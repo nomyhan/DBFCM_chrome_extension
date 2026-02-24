@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kennel Connection</title>
+    <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🐾 Kennel Connection</h1>
+            <div class="header-actions">
+                <button id="backend-status-btn" class="icon-btn backend-stopped" title="Backend server status">
+                    <span class="backend-icon">⏹️</span>
+                </button>
+                <button id="refresh-btn" class="icon-btn" title="Refresh data">
+                    <span class="refresh-icon">🔄</span>
+                </button>
+                <button id="settings-btn" class="icon-btn" title="Settings">
+                    <span>⚙️</span>
+                </button>
+            </div>
+        </div>
+
+        <div class="tab-bar">
+            <button class="tab-btn active" data-tab="waitlist">Waitlist</button>
+            <button class="tab-btn" data-tab="availability">Availability</button>
+            <button class="tab-btn" data-tab="chat">Know-a-bot</button>
+            <button class="tab-btn" data-tab="sms">SMS <span id="sms-badge" class="sms-badge hidden">0</span></button>
+        </div>
+
+        <div id="settings-panel" class="settings-panel hidden">
+            <h3>Settings</h3>
+            <div class="setting-group">
+                <label for="backend-url">Backend Server URL:</label>
+                <input type="text" id="backend-url" placeholder="http://localhost:8000" />
+                <small>The server that provides waitlist data (e.g., http://localhost:8000)</small>
+            </div>
+            <div class="setting-group">
+                <label for="liveaccess-url">LiveAccess Base URL:</label>
+                <input type="text" id="liveaccess-url" placeholder="https://dbfcm.mykcapp.com/#/grooming/appointment/" />
+                <small>LiveAccess URL for appointment links (appid will be added automatically)</small>
+            </div>
+            <div class="conflict-check-row">
+                <div class="conflict-check-info">
+                    <span class="conflict-check-label">Schedule Conflict Check</span>
+                    <span id="conflict-cache-status" class="conflict-cache-status">Not yet run</span>
+                </div>
+                <button id="run-conflicts-btn" class="btn btn-secondary">Run Check</button>
+            </div>
+            <div class="setting-actions">
+                <button id="save-settings" class="btn btn-primary">Save</button>
+                <button id="cancel-settings" class="btn btn-secondary">Cancel</button>
+            </div>
+        </div>
+
+        <!-- Conflicts Modal -->
+        <div id="conflicts-modal" class="conflicts-modal hidden">
+            <div class="conflicts-modal-header">
+                <span class="conflicts-modal-title">Schedule Conflict Check</span>
+                <button id="conflicts-modal-close" class="conflicts-modal-close">✕</button>
+            </div>
+            <div id="conflicts-modal-content" class="conflicts-modal-body">
+                <div class="empty-state">
+                    <h2>Schedule Conflict Checker</h2>
+                    <p>Scans the next 120 days for slots that appear available but would overlap with existing appointments.</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Waitlist Tab -->
+        <div id="waitlist-tab" class="tab-content active">
+            <div class="info-bar">
+                <div class="info-item">
+                    <strong>Count:</strong>
+                    <span id="waitlist-count">-</span>
+                </div>
+                <div class="info-item">
+                    <strong>Updated:</strong>
+                    <span id="last-updated">-</span>
+                </div>
+            </div>
+
+            <div id="waitlist-content" class="content">
+                <div class="loading">
+                    <div class="spinner"></div>
+                    <p>Loading waitlist...</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Availability Tab -->
+        <div id="availability-tab" class="tab-content">
+            <div class="availability-controls">
+                <div class="groomer-select-group">
+                    <label for="groomer-select">Select Groomer:</label>
+                    <select id="groomer-select">
+                        <option value="">-- Select Groomer --</option>
+                    </select>
+                </div>
+                <div class="slot-filter-group">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="include-230-slot">
+                        <span>Include 2:30 slot</span>
+                    </label>
+                </div>
+            </div>
+
+            <div id="availability-content" class="content">
+                <div class="empty-state">
+                    <h2>Select a Groomer</h2>
+                    <p>Choose a groomer to see their next available appointments</p>
+                </div>
+            </div>
+        </div>
+        <!-- Noah-bot Chat Tab -->
+        <div id="chat-tab" class="tab-content">
+            <div id="chat-messages" class="content">
+                <div class="chat-messages-inner">
+                    <div class="chat-bubble bot">Hi! I'm Know-a-bot. Ask me anything about scheduling, procedures, or grooming terminology — I can also look up clients and book appointments directly in the live system. Note: I'm experimental. Actions like booking or adding notes go directly into the database and may be hard to undo, so I'll always ask you to confirm before making any changes.</div>
+                </div>
+            </div>
+            <div class="chat-input-bar">
+                <button id="chat-reset-btn" title="Start new conversation">↺</button>
+                <input type="text" id="chat-input" placeholder="Ask a question…" autocomplete="off">
+                <button id="chat-send-btn">Send</button>
+            </div>
+        </div>
+
+        <!-- SMS Booking Modal -->
+        <div id="booking-modal" class="booking-modal hidden">
+            <div class="booking-modal-inner">
+                <div class="booking-modal-header">
+                    <span>Book Appointment</span>
+                    <button id="booking-modal-close" class="booking-modal-close">✕</button>
+                </div>
+                <div id="booking-modal-body" class="booking-modal-body">
+                    <div class="booking-extracting">Extracting details from conversation…</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- SMS Drafts Tab -->
+        <div id="sms-tab" class="tab-content">
+            <div class="sms-toolbar">
+                <span class="sms-toolbar-note">⚠️ A KCApp tab must be open to send</span>
+                <button id="sms-refresh-btn" class="sms-toolbar-refresh" title="Refresh drafts">↻ Refresh</button>
+            </div>
+            <div id="sms-content" class="content">
+                <div class="empty-state">
+                    <h2>SMS Drafts</h2>
+                    <p>Loading…</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="popup.js"></script>
+</body>
+</html>

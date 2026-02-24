@@ -1,0 +1,23 @@
+# Auto-generated at backend startup (contains machine-specific WSL paths)
+noahbot_mcp_config.json
+
+# Runtime state (changes on every conflict check)
+conflict_cache.json
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# Backup files
+*.bak
+
+# Log files
+*.log
+
+# Local environment / credentials (for future use)
+.env
+config.local.json
+
+# macOS
+.DS_Store

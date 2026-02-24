@@ -1,0 +1,303 @@
+================================================================================
+INSTALLATION GUIDE - WKennel7 Waitlist Chrome/Edge Extension
+================================================================================
+
+STEP-BY-STEP INSTALLATION:
+==========================
+
+PART 1: INSTALL THE EXTENSION
+------------------------------
+
+1. Open your browser (Chrome or Edge)
+
+2. Navigate to extensions page:
+   Chrome: chrome://extensions/
+   Edge:   edge://extensions/
+
+3. Enable Developer Mode:
+   → Look for "Developer mode" toggle in top-right corner
+   → Click to turn it ON (should turn blue)
+
+4. Click "Load unpacked" button
+   → This appears after enabling Developer mode
+
+5. Browse to the waitlist_extension folder
+   → Select the FOLDER (not a file inside it)
+   → Click "Select Folder"
+
+6. Extension should now appear!
+   → You'll see "WKennel7 Waitlist Viewer" in your extensions list
+   → A paw print icon should appear in your browser toolbar
+   → If you don't see it, click the puzzle piece icon and pin it
+
+✓ Extension is now installed!
+
+PART 2: START THE BACKEND SERVER
+---------------------------------
+
+The extension needs a local server to fetch data from SQL Server.
+
+WINDOWS USERS:
+   Option A - Double-click method:
+   1. Find "start_backend.bat" in the waitlist_extension folder
+   2. Double-click it
+   3. A command window opens showing:
+      "Server running on: http://localhost:8000"
+   4. Keep this window open!
+
+   Option B - Command Prompt method:
+   1. Open Command Prompt
+   2. Type: cd C:\path\to\waitlist_extension
+   3. Type: python backend_server.py
+   4. Keep this window open!
+
+LINUX/MAC USERS:
+   1. Open Terminal
+   2. Type: cd /path/to/waitlist_extension
+   3. Type: python3 backend_server.py
+   4. Keep this window open!
+
+You should see:
+   ========================================================
+   WKennel7 Waitlist Backend Server
+   ========================================================
+   Server running on: http://localhost:8000
+   API endpoint: http://localhost:8000/api/waitlist
+
+✓ Backend server is now running!
+
+PART 3: CONFIGURE THE EXTENSION
+--------------------------------
+
+This is a ONE-TIME setup.
+
+1. Click the extension icon (paw print) in your browser toolbar
+
+2. Click the ⚙️ (gear/settings) icon in the top-right
+
+3. Enter these settings:
+
+   Backend Server URL:
+   http://localhost:8000/api/waitlist
+
+   LiveAccess Base URL:
+   https://dbfcm.mykcapp.com/#/grooming/appointment/
+
+4. Click "Save"
+
+5. Settings panel closes automatically
+
+✓ Extension is now configured!
+
+PART 4: TEST IT OUT
+--------------------
+
+1. Click the extension icon (paw print) in your toolbar
+
+2. The side panel should open on the right side:
+   - Docks to the right edge of your browser
+   - Shows list of waitlist appointments
+   - Count showing number of appointments
+   - Last updated timestamp
+   - Panel stays open while browsing
+
+3. Try clicking on an appointment:
+   - It should open LiveAccess in a new tab
+   - The appointment should be loaded
+   - Side panel stays open
+
+4. Try the refresh button (🔄):
+   - Should reload the data
+   - Timestamp should update
+
+5. Click the extension icon again to close the side panel
+
+✓ Everything is working!
+
+================================================================================
+
+DAILY USAGE:
+============
+
+Starting Your Day:
+   1. Start the backend server (double-click start_backend.bat)
+   2. Keep the server window open
+   3. Use extension normally throughout the day
+
+Using the Extension:
+   1. Click extension icon to open side panel
+   2. Side panel docks to right side of browser
+   3. View current waitlist while browsing
+   4. Click appointments to open in LiveAccess
+   5. Click 🔄 to refresh data
+   6. Click icon again to close side panel
+
+End of Day:
+   1. Close the backend server window
+   2. Or press Ctrl+C in the server window
+
+The extension stays installed - you only need to start the backend server
+each day (or set it to auto-start).
+
+================================================================================
+
+VISUAL REFERENCE:
+=================
+
+Extension Icon:
+   🐾 - Purple paw print with badge showing count
+
+Extension Popup Layout:
+   ┌─────────────────────────────────────┐
+   │ 🐾 Waitlist        🔄  ⚙️          │ ← Header
+   ├─────────────────────────────────────┤
+   │ Count: 21    Updated: Oct 22, 2:30  │ ← Info bar
+   ├─────────────────────────────────────┤
+   │                                     │
+   │  Hinkley# - Wallace    [Handstrip] │ ← Appointment
+   │  GLSeq: 153170   Phone: (847)...   │
+   │  Groomer: Kumi   Added: Oct 15     │
+   │  📝 Target mid Nov before Thanks   │
+   │                                     │
+   │  Louie - Chanchani  [Full Service] │
+   │  GLSeq: 153830   Phone: (505)...   │
+   │  Added: Sep 30                     │
+   │  📝 ASAP to replace 11/12  [ASAP]  │
+   │                                     │
+   │  [More appointments...]             │
+   │                                     │
+   └─────────────────────────────────────┘
+
+Settings Panel (click ⚙️):
+   ┌─────────────────────────────────────┐
+   │ Settings                            │
+   ├─────────────────────────────────────┤
+   │                                     │
+   │ Backend Server URL:                 │
+   │ ┌─────────────────────────────────┐│
+   │ │ http://localhost:8000/api/wait..││
+   │ └─────────────────────────────────┘│
+   │ The server that provides data       │
+   │                                     │
+   │ LiveAccess Base URL:                │
+   │ ┌─────────────────────────────────┐│
+   │ │ https://dbfcm.mykcapp.com/#/gr..││
+   │ └─────────────────────────────────┘│
+   │ LiveAccess URL for appointments     │
+   │                                     │
+   │     [Save]        [Cancel]          │
+   │                                     │
+   └─────────────────────────────────────┘
+
+================================================================================
+
+TROUBLESHOOTING INSTALLATION:
+==============================
+
+Problem: Can't find "Load unpacked" button
+Solution: Make sure Developer mode is enabled (toggle in top-right)
+
+Problem: Extension won't install
+Solution:
+   - Make sure you're selecting the FOLDER, not a file
+   - Check that all files are present (manifest.json required)
+   - Try restarting browser
+
+Problem: Extension shows error immediately
+Solution: Backend server isn't running yet - start it first
+
+Problem: Backend server won't start
+Solution:
+   - Install Python 3: python.org/downloads
+   - Install sqlcmd: aka.ms/sqlcmd
+   - Check SQL credentials in backend_server.py
+
+Problem: "Port already in use" error
+Solution:
+   - Another program is using port 8000
+   - Use different port: python backend_server.py 9000
+   - Update extension settings to: http://localhost:9000/api/waitlist
+
+Problem: Extension shows no data
+Solution:
+   - Check backend server is running
+   - Check settings (⚙️) for correct URL
+   - Try opening http://localhost:8000/api/waitlist in browser
+   - Should show JSON data
+
+Problem: Clicking appointments doesn't work
+Solution:
+   - Check LiveAccess URL in settings
+   - Make sure LiveAccess is accessible from your computer
+   - Check popup permissions (right-click extension → Manage)
+
+Problem: Badge not showing count
+Solution:
+   - Wait 5 minutes for auto-update
+   - Click 🔄 to force refresh
+   - Check extension has necessary permissions
+
+================================================================================
+
+INSTALLING ON ADDITIONAL COMPUTERS:
+====================================
+
+1. Copy the entire "waitlist_extension" folder to new computer
+
+2. Install requirements:
+   - Python 3: python.org/downloads
+   - sqlcmd: aka.ms/sqlcmd
+
+3. Edit backend_server.py (if SQL Server is on different machine):
+   Lines 9-12, update connection details
+
+4. Follow installation steps above:
+   - Install extension in browser
+   - Start backend server
+   - Configure settings
+
+5. Done! Extension works on new computer
+
+No complex setup, no database installation needed.
+
+================================================================================
+
+GETTING HELP:
+=============
+
+Check the logs:
+   - Backend server console shows request/error logs
+   - Browser DevTools (F12 in popup) shows JavaScript errors
+   - Extension page (chrome://extensions/) shows any load errors
+
+Common issues:
+   - See TROUBLESHOOTING section above
+   - See README.md for detailed documentation
+   - Check QUICK_START.txt for overview
+
+Still stuck?
+   - Review backend server output
+   - Test API directly: http://localhost:8000/api/waitlist
+   - Check SQL Server connectivity with sqlcmd
+
+================================================================================
+
+CONGRATULATIONS!
+================
+
+You now have a professional browser extension that provides instant access
+to the WKennel7 waitlist with direct LiveAccess integration!
+
+✓ One-click access from browser toolbar
+✓ Real-time data from SQL Server
+✓ Direct appointment links
+✓ Badge notifications
+✓ Beautiful interface
+
+Enjoy using it!
+
+================================================================================
+Created: 2025-10-22
+For: WKennel7 Grooming Salon
+By: Noah Han
+================================================================================

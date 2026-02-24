@@ -1,0 +1,181 @@
+================================================================================
+QUICK START - WKennel7 Waitlist Chrome/Edge Extension
+================================================================================
+
+3-MINUTE SETUP:
+---------------
+
+1. INSTALL EXTENSION
+   - Open Chrome/Edge
+   - Go to: chrome://extensions/ (or edge://extensions/)
+   - Enable "Developer mode" (top-right toggle)
+   - Click "Load unpacked"
+   - Select this folder (waitlist_extension)
+   - Extension appears in toolbar!
+
+2. START BACKEND SERVER
+   Windows:
+     - Double-click backend_server.py
+     OR
+     - Open Command Prompt
+     - cd C:\path\to\waitlist_extension
+     - python backend_server.py
+
+   Linux/Mac:
+     - Open Terminal
+     - cd /path/to/waitlist_extension
+     - python3 backend_server.py
+
+   Keep this window open!
+
+3. CONFIGURE (first time only)
+   - Click extension icon in browser
+   - Click ⚙️ (settings gear)
+   - Backend URL: http://localhost:8000/api/waitlist
+   - LiveAccess URL: https://dbfcm.mykcapp.com/#/grooming/appointment/
+   - Click Save
+
+4. USE IT!
+   - Click extension icon to open side panel (docks to right side)
+   - Side panel stays open while browsing
+   - Click any appointment to open in LiveAccess
+   - Badge shows current count
+   - Click 🔄 to refresh
+   - Click icon again to close side panel
+
+THAT'S IT!
+
+================================================================================
+
+WHAT YOU GET:
+-------------
+
+✓ One-click waitlist access from browser toolbar
+✓ Real-time data from SQL Server
+✓ Direct LiveAccess links for each appointment
+✓ Badge counter showing waitlist size
+✓ ASAP requests highlighted in red
+✓ Color-coded service types
+✓ Beautiful responsive design
+
+FILES INCLUDED:
+---------------
+
+Extension Files (required):
+  - manifest.json       Extension configuration
+  - popup.html          User interface
+  - popup.css           Styling
+  - popup.js            Frontend logic
+  - background.js       Badge updates
+  - icons/              Extension icons
+
+Backend Files (required):
+  - backend_server.py   Python server to fetch SQL data
+
+Documentation:
+  - README.md           Full documentation
+  - QUICK_START.txt     This file
+
+REQUIREMENTS:
+-------------
+
+✓ Chrome, Edge, or Chromium-based browser
+✓ Python 3.x
+✓ sqlcmd (SQL Server Command Line Tools)
+✓ Access to WKennel7 SQL Server database
+
+PORTING TO ANOTHER COMPUTER:
+----------------------------
+
+1. Copy entire "waitlist_extension" folder
+2. Install Python 3 and sqlcmd
+3. Edit SQL connection in backend_server.py (lines 9-12):
+
+   SQL_SERVER = "desktop-bikigbr,2721"
+   SQL_DATABASE = "wkennel7"
+   SQL_USER = "noah"
+   SQL_PASSWORD = "noah"
+
+4. Install extension (steps above)
+5. Start backend server
+6. Configure extension settings
+
+TROUBLESHOOTING:
+----------------
+
+Extension shows error:
+  → Is backend server running?
+  → Check settings (⚙️) for correct URL
+  → Try: http://localhost:8000/api/waitlist in browser
+
+Backend won't start:
+  → Install sqlcmd: https://aka.ms/sqlcmd
+  → Check SQL credentials in backend_server.py
+  → Try different port: python backend_server.py 9000
+
+LiveAccess links don't work:
+  → Check LiveAccess URL in settings
+  → Make sure LiveAccess is accessible
+
+Badge not showing:
+  → Wait 5 minutes (auto-updates)
+  → Click 🔄 to force refresh
+  → Check extension permissions
+
+DAILY USE:
+----------
+
+1. Start backend server (once per computer session)
+2. Click extension icon anytime
+3. View waitlist, click appointments
+4. Refresh as needed
+
+SERVER AUTO-START (OPTIONAL):
+-----------------------------
+
+Windows - Run at startup:
+  1. Create shortcut to backend_server.py
+  2. Press Win+R, type: shell:startup
+  3. Copy shortcut to Startup folder
+
+Linux/Mac - Run in background:
+  nohup python3 backend_server.py > backend.log 2>&1 &
+
+WHAT MAKES THIS BETTER:
+-----------------------
+
+VS Static HTML:
+  ✓ Always live data (no manual refresh needed)
+  ✓ Integrated in browser (one click away)
+  ✓ Badge counter (see count without opening)
+  ✓ Auto-updates every 5 minutes
+
+VS Web Application:
+  ✓ No web server required
+  ✓ Works entirely locally
+  ✓ Faster (no page loads)
+  ✓ Browser integration
+
+SECURITY:
+---------
+
+✓ Runs entirely on your computer
+✓ No external servers
+✓ No data transmitted outside your network
+✓ SQL credentials stay local
+
+CURRENT STATUS:
+---------------
+
+✓ Extension created and ready
+✓ Backend server ready
+✓ Icons generated
+✓ 21 waitlist appointments available
+✓ Ready to install!
+
+For full documentation, see README.md
+
+================================================================================
+Created: 2025-10-22
+Support: Noah Han
+================================================================================

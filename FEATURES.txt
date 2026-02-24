@@ -1,0 +1,335 @@
+================================================================================
+WKennel7 Waitlist Viewer - Complete Feature List
+================================================================================
+
+VERSION: 1.0.2
+UPDATED: 2025-10-22
+
+================================================================================
+CORE FEATURES
+================================================================================
+
+✓ Browser Extension Integration
+  - Lives in Chrome/Edge toolbar
+  - One-click access to waitlist
+  - Badge shows current count
+  - Auto-updates every 5 minutes
+
+✓ Real-Time Data
+  - Fetches live data from SQL Server
+  - Shows current waitlist status
+  - Includes all appointments marked as waitlist
+  - Ordered by GLSeq (priority)
+
+✓ Direct LiveAccess Links
+  - Click any appointment to open in cloud app
+  - Format: https://dbfcm.mykcapp.com/#/grooming/appointment/?appid=XXXXX
+  - Opens in new tab
+  - Automatic appid parameter
+
+================================================================================
+APPOINTMENT DISPLAY
+================================================================================
+
+PRIMARY INFORMATION (Always Visible):
+✓ Pet Name - Name of the pet
+✓ Client Last Name - Owner's name
+✓ Service Type - Color-coded badges:
+  - Full Service (green)
+  - Handstrip (yellow)
+  - Bath (light blue)
+  - Groom (blue)
+✓ GLSeq - Appointment ID in badge format
+✓ Phone Number - Client contact (clickable on mobile)
+✓ Preferred Groomer - If specified
+✓ Added Date - When added to waitlist
+✓ Notes - Special requests and instructions
+✓ ASAP Badge - Red badge for urgent requests
+
+EXPANDABLE DETAILS (Click "Show Details"):
+✓ Warning Section (Yellow box with ⚠️):
+  - Client Warning (CLWarning)
+  - Pet Warning (PtWarning)
+  - Groom Warning (PTGroomWarning)
+  - Critical information highlighted
+
+✓ History Section (Gray box):
+  - Last Completed Visit Date
+  - Last Completed Visit Notes (GLDescription)
+  - Next Scheduled Appointment Date
+  - Provides context for scheduling
+
+================================================================================
+USER INTERFACE
+================================================================================
+
+✓ Modern Design
+  - Purple gradient header
+  - Clean, professional appearance
+  - Card-based appointment layout
+  - Hover effects for interaction
+
+✓ Responsive Layout
+  - 750px width (optimal for information display)
+  - 600px height with scrolling
+  - Smooth scroll behavior
+  - Touch-friendly buttons
+
+✓ Color Coding
+  - Service types: Different colors for easy identification
+  - Warnings: Yellow background with orange border
+  - History: Gray background
+  - ASAP: Red badges
+  - Active elements: Purple accents
+
+✓ Interactive Elements
+  - Expandable details sections
+  - Smooth animations
+  - Click-to-expand buttons
+  - Visual feedback on hover
+
+✓ Information Hierarchy
+  - Most important info always visible
+  - Details hidden until needed
+  - Prevents information overload
+  - Easy to scan quickly
+
+================================================================================
+SETTINGS & CONFIGURATION
+================================================================================
+
+✓ Settings Panel (Click ⚙️)
+  - Backend Server URL configuration
+  - LiveAccess URL configuration
+  - Saved to browser sync storage
+  - Persists across sessions
+
+✓ Default Configuration
+  - Backend: http://localhost:8000/api/waitlist
+  - LiveAccess: https://dbfcm.mykcapp.com/#/grooming/appointment/
+  - Easy to customize for different setups
+
+================================================================================
+BACKEND SERVER
+================================================================================
+
+✓ Python HTTP Server
+  - Simple, lightweight design
+  - No external dependencies (beyond sqlcmd)
+  - CORS-enabled for extension access
+  - Real-time SQL Server queries
+
+✓ Data Fetching
+  - Comprehensive SQL query
+  - Joins: GroomingLog, Pets, Clients, Employees
+  - Subqueries for history and future appointments
+  - Efficient single query for all data
+
+✓ API Endpoint
+  - GET /api/waitlist
+  - Returns JSON format
+  - Includes metadata (count, timestamp)
+  - Error handling built-in
+
+✓ Easy Setup
+  - Double-click batch file (Windows)
+  - Single command line (Linux/Mac)
+  - Configurable SQL connection
+  - Runs on any available port
+
+================================================================================
+DATA FIELDS COLLECTED
+================================================================================
+
+APPOINTMENT DATA:
+- GLSeq (Appointment ID)
+- GLDate (Target date)
+- GLDateEntered (When added to waitlist)
+- GLInTime (Requested time)
+- GLDescription (Waitlist notes)
+
+CLIENT DATA:
+- CLLastName (Last name)
+- CLPhone1 (Primary phone)
+- CLWarning (Client warnings)
+
+PET DATA:
+- PtPetName (Pet name)
+- PtWarning (Pet warnings)
+- PTGroomWarning (Grooming-specific warnings)
+
+SERVICE DATA:
+- Service type (Full Service, Handstrip, Bath, Groom)
+- Preferred groomer name
+
+HISTORY DATA:
+- Last completed appointment date
+- Last completed appointment notes
+- Next scheduled appointment date
+
+EMPLOYEE DATA:
+- Groomer first name (from GLGroomerID or GLOthersID)
+
+================================================================================
+TECHNICAL SPECIFICATIONS
+================================================================================
+
+✓ Browser Compatibility
+  - Chrome (version 88+)
+  - Edge (version 88+)
+  - Brave
+  - Any Chromium-based browser
+  - Manifest V3 (latest standard)
+
+✓ Security
+  - Runs entirely locally
+  - No external data transmission
+  - Localhost-only backend
+  - SQL credentials stored locally
+  - Browser extension permissions minimal
+
+✓ Performance
+  - Fast JSON parsing
+  - Efficient DOM updates
+  - Smooth animations
+  - Badge updates every 5 minutes
+  - Instant popup display
+
+✓ Data Format
+  - JSON API response
+  - Pipe-delimited SQL output parsing
+  - Date formatting (YYYY-MM-DD)
+  - Time formatting (12-hour with AM/PM)
+  - Null handling built-in
+
+================================================================================
+AUTOMATION FEATURES
+================================================================================
+
+✓ Auto-Update Badge
+  - Updates count every 5 minutes
+  - Shows waitlist count on icon
+  - Purple background color
+  - Clears when count is zero
+
+✓ Manual Refresh
+  - Click 🔄 button anytime
+  - Fetches latest data
+  - Updates timestamp
+  - Spinning animation during refresh
+
+✓ Background Service Worker
+  - Runs independently
+  - Handles periodic updates
+  - Sets badge notifications
+  - Minimal resource usage
+
+================================================================================
+DEPLOYMENT & PORTABILITY
+================================================================================
+
+✓ Easy Installation
+  - Load unpacked extension
+  - Start backend server
+  - Configure once
+  - Use immediately
+
+✓ Portable
+  - Single folder contains everything
+  - Copy to any computer
+  - Edit SQL connection
+  - Install and run
+
+✓ No Dependencies
+  - No npm/node required
+  - No build process
+  - No compilation
+  - Just Python 3 + sqlcmd
+
+✓ Multi-Computer Support
+  - Same extension on multiple machines
+  - Each runs own backend server
+  - Settings sync via Chrome
+  - Independent configurations
+
+================================================================================
+USE CASES
+================================================================================
+
+✓ Quick Waitlist Check
+  - Click icon to see current waitlist
+  - No need to open full application
+  - Instant access from any browser tab
+
+✓ Customer Follow-Up
+  - See ASAP requests immediately
+  - Check phone numbers for callbacks
+  - Review special requirements
+  - Prioritize by GLSeq order
+
+✓ Scheduling Decisions
+  - View appointment history
+  - Check next scheduled dates
+  - Review grooming notes
+  - Make informed scheduling choices
+
+✓ Warning Awareness
+  - Client warnings immediately visible
+  - Pet warnings for groomer safety
+  - Grooming warnings for special handling
+  - Critical information at fingertips
+
+✓ LiveAccess Integration
+  - One-click access to full appointment
+  - Edit directly in cloud app
+  - Book from waitlist
+  - Seamless workflow
+
+================================================================================
+COMPARISON TO ALTERNATIVES
+================================================================================
+
+vs. SQL Server Management Studio:
+  ✓ Faster access
+  ✓ No SQL knowledge required
+  ✓ Better visual presentation
+  ✓ Always available in browser
+
+vs. LiveAccess Waitlist Page:
+  ✓ Quicker to open (one click)
+  ✓ Shows additional context
+  ✓ Warning information included
+  ✓ History information available
+
+vs. Python Script:
+  ✓ Visual interface
+  ✓ No command line needed
+  ✓ Better formatting
+  ✓ Persistent availability
+
+vs. Static HTML Page:
+  ✓ Always live data
+  ✓ No manual refresh needed
+  ✓ Badge notifications
+  ✓ Browser integration
+
+================================================================================
+FUTURE ENHANCEMENT IDEAS
+================================================================================
+
+Potential additions (not yet implemented):
+- Keyboard shortcuts for quick access
+- Search/filter waitlist entries
+- Sort by different criteria
+- Export to CSV
+- Print-friendly view
+- Desktop notifications
+- Multi-groomer filtering
+- Date range filtering
+
+================================================================================
+
+This extension provides a professional, efficient solution for managing
+the WKennel7 waitlist with minimal overhead and maximum usability.
+
+================================================================================

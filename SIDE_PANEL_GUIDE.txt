@@ -1,0 +1,235 @@
+================================================================================
+WKennel7 Waitlist Viewer - Side Panel Guide
+================================================================================
+
+WHAT IS A SIDE PANEL?
+=====================
+
+A side panel is a docked panel that opens on the right side of your browser
+window. Unlike a popup that disappears when you click elsewhere, the side
+panel stays open and visible while you browse.
+
+BENEFITS OF SIDE PANEL:
+=======================
+
+✓ Stays open while browsing
+✓ View waitlist while working in LiveAccess
+✓ No need to keep reopening
+✓ Resizable width (drag the left edge)
+✓ Full-height display
+✓ Perfect for multi-tasking
+✓ Always accessible when needed
+
+HOW IT WORKS:
+=============
+
+1. Click the extension icon (paw print) in your toolbar
+2. Side panel slides out from the right side
+3. Shows full waitlist with all information
+4. Panel stays open while you browse other tabs
+5. Click extension icon again to close panel
+
+VISUAL LAYOUT:
+==============
+
+┌──────────────────────────────────────────────┬─────────────────────────┐
+│                                              │  🐾 Waitlist        🔄⚙│
+│                                              ├─────────────────────────┤
+│                                              │ Count: 21  Updated: ... │
+│                                              ├─────────────────────────┤
+│      MAIN BROWSER WINDOW                     │                         │
+│      (LiveAccess, etc.)                      │  Hinkley# - Wallace     │
+│                                              │  [Handstrip]            │
+│                                              │  GLSeq: 153170          │
+│                                              │  Phone: (847)287-5060   │
+│                                              │  [Show Details ▼]       │
+│                                              │                         │
+│                                              │  Louie - Chanchani      │
+│                                              │  [Full Service] [ASAP]  │
+│                                              │  GLSeq: 153830          │
+│                                              │  Phone: (505)401-7574   │
+│                                              │  [Show Details ▼]       │
+│                                              │                         │
+│                                              │  [More appointments...] │
+│                                              │                         │
+│                                              │  ↕ (scrollable)        │
+│                                              │                         │
+└──────────────────────────────────────────────┴─────────────────────────┘
+           Main Content Area                      Side Panel (resizable)
+
+TYPICAL WORKFLOW:
+=================
+
+Morning:
+  1. Start backend server
+  2. Open browser
+  3. Click extension icon
+  4. Side panel opens on right
+  5. Review waitlist priorities
+
+During Day:
+  1. Panel stays open while working
+  2. Click appointment to open in LiveAccess
+  3. Book appointment in LiveAccess
+  4. Click 🔄 to refresh waitlist
+  5. Continue with next customer
+
+End of Day:
+  1. Click extension icon to close panel
+  2. Stop backend server
+
+RESIZING THE PANEL:
+===================
+
+Chrome/Edge allows you to resize the side panel:
+
+1. Hover over the left edge of the panel
+2. Cursor changes to resize cursor (↔)
+3. Click and drag left/right
+4. Release to set width
+5. Browser remembers your preferred width
+
+USING WITH LIVEACCESS:
+======================
+
+Perfect workflow:
+
+1. Open side panel (click extension icon)
+2. Navigate to LiveAccess in main window
+3. View waitlist in side panel
+4. Click appointment in side panel
+5. LiveAccess opens in new tab
+6. Side panel stays visible
+7. Book appointment
+8. Return to previous tab
+9. Side panel still showing waitlist
+
+ADVANTAGES OVER POPUP:
+======================
+
+Popup (Old Way):
+  ✗ Closes when clicking elsewhere
+  ✗ Must reopen constantly
+  ✗ Fixed small size
+  ✗ Interrupts workflow
+  ✗ Can't see while working
+
+Side Panel (New Way):
+  ✓ Stays open persistently
+  ✓ Open once, use all day
+  ✓ Resizable width
+  ✓ Parallel workflow
+  ✓ Always visible when needed
+
+KEYBOARD SHORTCUTS:
+===================
+
+Chrome/Edge doesn't have default shortcuts for side panels, but you can:
+
+1. Go to chrome://extensions/shortcuts
+2. Find "WKennel7 Waitlist Viewer"
+3. Set a custom keyboard shortcut
+4. Example: Ctrl+Shift+W
+
+Then press your shortcut to toggle the side panel!
+
+MULTI-MONITOR SETUP:
+====================
+
+Works great with multiple monitors:
+
+Option 1: Browser on one monitor, side panel visible
+Option 2: Move LiveAccess tab to second monitor, keep waitlist on first
+Option 3: Drag browser window to span monitors for extra wide view
+
+TROUBLESHOOTING:
+================
+
+Panel won't open:
+  → Check if browser supports side panels (Chrome 114+, Edge 114+)
+  → Reload extension
+  → Try restarting browser
+
+Panel appears but is blank:
+  → Check backend server is running
+  → Check settings (⚙️) for correct URLs
+  → Click 🔄 to refresh
+
+Panel is too narrow/wide:
+  → Drag left edge to resize
+  → Browser remembers your preference
+
+Can't close panel:
+  → Click extension icon again
+  → Or click the X in panel header (if available)
+  → Or reload the page
+
+BROWSER COMPATIBILITY:
+======================
+
+Side panels are supported in:
+  ✓ Chrome 114+ (June 2023)
+  ✓ Edge 114+ (June 2023)
+  ✓ Brave (recent versions)
+  ✓ Other Chromium browsers (check version)
+
+Not supported in:
+  ✗ Firefox (use popup version)
+  ✗ Safari (use popup version)
+  ✗ Older Chrome/Edge versions
+
+PRIVACY & PERFORMANCE:
+======================
+
+✓ Panel content only loads when opened
+✓ Minimal memory usage when closed
+✓ No background processing beyond badge updates
+✓ All data stays local (backend on localhost)
+✓ No tracking or external connections
+
+TIPS & TRICKS:
+==============
+
+1. Keep panel open all day for quick reference
+2. Use ⚙️ settings to customize URLs
+3. Resize panel to your preferred width
+4. Use 🔄 before checking appointments
+5. Set keyboard shortcut for faster access
+6. Panel works across all browser tabs
+7. Survives browser restart (reopen with icon click)
+
+COMPARISON TO ALTERNATIVES:
+===========================
+
+vs. Browser Tab:
+  ✓ Doesn't take up tab space
+  ✓ Always visible
+  ✓ Cleaner workflow
+
+vs. Separate Window:
+  ✓ Integrated into browser
+  ✓ Moves with browser window
+  ✓ Easier to manage
+
+vs. Popup:
+  ✓ Stays open
+  ✓ Larger display
+  ✓ Resizable
+
+RECOMMENDED SETUP:
+==================
+
+For best experience:
+
+1. Set custom keyboard shortcut (Ctrl+Shift+W)
+2. Resize panel to ~400-500px width
+3. Keep panel open during work hours
+4. Position browser window to accommodate panel
+5. Use dual monitors if available
+
+This gives you instant waitlist access while maintaining full workspace!
+
+================================================================================
+Created: 2025-10-22
+Version: 1.0.3
+================================================================================

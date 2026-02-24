@@ -1,0 +1,112 @@
+================================================================================
+CHANGELOG - WKennel7 Waitlist Extension
+================================================================================
+
+Version 1.0.5 - 2025-10-22
+--------------------------
+
+NEW FEATURE:
+✓ Added backend server status indicator
+✓ Visual indicator shows if backend is running (green) or stopped (red)
+✓ Click status button for instructions on starting/stopping backend
+✓ Auto-checks status every 10 seconds
+✓ Helpful alerts guide you to start backend when needed
+
+UI ENHANCEMENT:
+- New button in header shows backend status with pulsing green/red dot
+- ▶️ = Running (green dot)
+- ⏹️ = Stopped (red dot)
+
+NOTE:
+Extensions cannot directly start/stop processes for security reasons.
+The status indicator helps you know when to manually start the backend.
+
+Version 1.0.4 - 2025-10-22
+--------------------------
+
+BUG FIX:
+✓ Fixed "Show Details" button not responding to clicks
+✓ Changed from onclick attribute to proper event listeners
+✓ Buttons now properly expand/collapse detail sections
+
+Version 1.0.3 - 2025-10-22
+--------------------------
+
+MAJOR CHANGES:
+✓ Converted from popup to side panel
+✓ Now docks to the right side of browser
+✓ Stays open while browsing
+✓ Resizable panel width
+✓ Full-height display
+✓ Click extension icon to open/close side panel
+
+BUG FIX:
+✓ Fixed delimiter issue - changed from pipe (|) to TAB
+✓ Warnings and history now display correctly
+✓ Pipe characters in notes no longer break parsing
+✓ All 16 data fields now parsed properly
+
+BENEFITS:
+- No more popup that closes when clicking away
+- View waitlist while browsing LiveAccess
+- Always visible when needed
+- Better for multi-tasking
+- More space for information display
+
+Version 1.0.2 - 2025-10-22
+--------------------------
+
+NEW FEATURES:
+✓ Added expandable "Show Details" section for each appointment
+✓ Warning system - displays client, pet, and grooming warnings
+✓ Appointment history - shows last completed visit date and notes
+✓ Future appointments - displays next scheduled appointment
+✓ Wider popup (750px) for better information display
+✓ Expandable sections prevent information overload
+
+DISPLAY ENHANCEMENTS:
+- Yellow warning section with ⚠️ icons for critical information
+- Gray history section for appointment context
+- Click "Show Details" to expand/collapse additional information
+- Smooth animations for expand/collapse
+
+NEW DATA FIELDS:
+- CLWarning (Client warnings)
+- PtWarning (Pet warnings)
+- PTGroomWarning (Grooming warnings)
+- Last completed appointment date
+- Last completed appointment notes (GLDescription)
+- Next scheduled appointment date
+
+Version 1.0.1 - 2025-10-22
+--------------------------
+
+CHANGES:
+✓ Removed "Target Date" field (appointments prioritized by GLSeq order)
+✓ Removed "Time" field (not needed for waitlist prioritization)
+✓ Updated LiveAccess URL format to cloud application
+  OLD: http://desktop-bikigbr:85/LiveAccess/default.aspx?glseq=XXXXX
+  NEW: https://dbfcm.mykcapp.com/#/grooming/appointment/?appid=XXXXX
+✓ Updated manifest permissions for cloud domain
+✓ Updated all documentation to reflect new URL format
+
+DISPLAY CHANGES:
+- Appointments now show: GLSeq, Phone, Groomer, Added Date
+- Cleaner, more focused display
+- Still ordered by GLSeq for priority handling
+
+Version 1.0.0 - 2025-10-22
+--------------------------
+
+INITIAL RELEASE:
+✓ Chrome/Edge browser extension
+✓ Real-time waitlist viewing
+✓ Direct LiveAccess links
+✓ Badge counter
+✓ ASAP highlighting
+✓ Color-coded service types
+✓ Settings panel
+✓ Python backend server
+✓ Complete documentation
+
+================================================================================
