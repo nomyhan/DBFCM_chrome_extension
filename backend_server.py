@@ -368,8 +368,11 @@ NOAH_PHONE_NUMBERS = {'5106465763', '5103310678'}
 NOAH_CELL_PRIMARY  = '5106465763'  # used for outbound escalation drafts
 
 def _normalize_phone(phone: str) -> str:
-    """Strip all non-digit characters from a phone number string."""
-    return re.sub(r'\D', '', phone or '')
+    """Strip all non-digit characters; strip leading '1' country code for US numbers."""
+    digits = re.sub(r'\D', '', phone or '')
+    if len(digits) == 11 and digits.startswith('1'):
+        digits = digits[1:]
+    return digits
 
 def _is_noah_phone(phone: str) -> bool:
     """Return True if the phone number belongs to Noah's personal cell."""

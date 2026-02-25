@@ -14,6 +14,8 @@ import json
 import os
 import subprocess
 import re
+import urllib.request
+import urllib.error
 from datetime import datetime, date
 
 # ---------------------------------------------------------------------------
@@ -37,6 +39,44 @@ if _HOSTNAME == 'DESKTOP-BIKIGBR':
 else:
     SQL_SERVER = "desktop-bikigbr,2721"
     SQL_AUTH_ARGS = ['-U', 'noah', '-P', 'noah']
+
+# ---------------------------------------------------------------------------
+# Backend URL resolution (MCP server runs in WSL; backend may run on Windows)
+# ---------------------------------------------------------------------------
+
+def _get_wsl_windows_host_ip():
+    """Return Windows host IP from WSL2 default gateway, or None if unavailable."""
+    try:
+        gw = subprocess.run(['ip', 'route', 'show', 'default'],
+                            capture_output=True, text=True, timeout=3)
+        return gw.stdout.split()[2]
+    except Exception:
+        try:
+            with open('/etc/resolv.conf') as f:
+                for line in f:
+                    if line.startswith('nameserver'):
+                        return line.split()[1]
+        except Exception:
+            pass
+    return None
+
+def _is_wsl2() -> bool:
+    """Return True if running inside WSL2."""
+    try:
+        with open('/proc/version') as f:
+            return 'microsoft' in f.read().lower()
+    except Exception:
+        return False
+
+# Build backend URL candidates: localhost first, Windows host IP as fallback.
+# On DESKTOP-BIKIGBR, _WIN_IP is already known; on other WSL2 machines, detect it.
+_BACKEND_URLS = ['http://localhost:8000']
+if _HOSTNAME == 'DESKTOP-BIKIGBR':
+    _BACKEND_URLS.append(f'http://{_WIN_IP}:8000')
+elif _is_wsl2():
+    _win_ip_fallback = _get_wsl_windows_host_ip()
+    if _win_ip_fallback:
+        _BACKEND_URLS.append(f'http://{_win_ip_fallback}:8000')
 
 VALID_GROOMER_IDS = {8, 59, 85, 91, 94, 95, 97}
 
@@ -1032,6 +1072,94 @@ AND (gl.GLDeleted IS NULL OR gl.GLDeleted = 0)
 
 
 # ---------------------------------------------------------------------------
+# Knowledge base tool
+# ---------------------------------------------------------------------------
+
+_KB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'staff', 'KNOWLEDGE_BASE.md')
+
+def tool_add_to_knowledge_base(args: dict) -> str:
+    """Append an entry to staff/KNOWLEDGE_BASE.md."""
+    category = args.get('category', 'General').strip()
+    content  = args.get('content', '').strip()
+    if not content:
+        return 'Error: content is required.'
+
+    os.makedirs(os.path.dirname(_KB_PATH), exist_ok=True)
+
+    # Initialize file with header if it doesn't exist yet
+    if not os.path.exists(_KB_PATH):
+        with open(_KB_PATH, 'w', encoding='utf-8') as f:
+            f.write('# DBFCM Staff Knowledge Base\n\n'
+                    'Business rules, policies, and operational notes added by staff via Know-a-bot.\n\n')
+
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M')
+    entry = f'\n## [{timestamp}] {category}\n\n{content}\n'
+    with open(_KB_PATH, 'a', encoding='utf-8') as f:
+        f.write(entry)
+
+    return (
+        f'Added to knowledge base under "{category}" at {timestamp}.\n'
+        f'Changes take effect after the next backend restart.'
+    )
+
+
+# ---------------------------------------------------------------------------
+# SMS draft tool (outbound via backend queue)
+# ---------------------------------------------------------------------------
+
+def tool_draft_sms(args: dict) -> str:
+    """Queue an SMS draft via the backend — for client messages or Noah escalations."""
+    recipient = args.get('recipient', '').strip()
+    message   = args.get('message', '').strip()
+    context   = args.get('context', '').strip()
+
+    if not recipient:
+        raise ValueError("'recipient' parameter is required.")
+    if not message:
+        raise ValueError("'message' parameter is required.")
+
+    payload = json.dumps({
+        'recipient': recipient,
+        'message':   message,
+        'context':   context,
+    }).encode('utf-8')
+
+    last_error = None
+    for base_url in _BACKEND_URLS:
+        url = f"{base_url}/api/sms/draft-from-knowabot"
+        req = urllib.request.Request(
+            url, data=payload,
+            headers={'Content-Type': 'application/json'},
+            method='POST',
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode('utf-8'))
+            if data.get('success'):
+                draft_id = data.get('draft_id', '?')
+                if recipient.lower() == 'noah':
+                    return (
+                        f"Escalation drafted to Noah (draft_id={draft_id}). "
+                        "It will appear in the SMS tab for staff to review and send. "
+                        "When Noah replies by text, his answer will be automatically added to the knowledge base."
+                    )
+                else:
+                    return (
+                        f"SMS draft created for {recipient} (draft_id={draft_id}). "
+                        "It will appear in the SMS tab for staff review before sending."
+                    )
+            else:
+                return f"Error creating draft: {data.get('error', 'unknown error')}"
+        except urllib.error.URLError as e:
+            last_error = e
+            continue
+        except Exception as e:
+            return f"Error: {e}"
+
+    return f"Could not reach backend at any address ({', '.join(_BACKEND_URLS)}): {last_error}"
+
+
+# ---------------------------------------------------------------------------
 # Tool registry
 # ---------------------------------------------------------------------------
 
@@ -1219,6 +1347,56 @@ TOOLS = {
                 }
             },
             "required": ["entity_type", "entity_id", "field", "text"]
+        }
+    },
+    "add_to_knowledge_base": {
+        "fn": tool_add_to_knowledge_base,
+        "description": (
+            "Add a business rule, policy, or operational note to the staff knowledge base. "
+            "Use this when staff share information that should be remembered for future reference — "
+            "e.g. 'we no longer do X', 'always charge Y for Z', 'client prefers ...'. "
+            "ALWAYS confirm with the user before calling — show exactly what will be written."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "category": {
+                    "type": "string",
+                    "description": "Short category label, e.g. 'Services', 'Pricing', 'Client Notes', 'Scheduling'."
+                },
+                "content": {
+                    "type": "string",
+                    "description": "The knowledge to record. Be clear and specific."
+                }
+            },
+            "required": ["category", "content"]
+        }
+    },
+    "draft_sms": {
+        "fn": tool_draft_sms,
+        "description": (
+            "Draft an SMS to a client (by name) or to Noah (the owner). "
+            "Drafts appear in the SMS tab for staff review before sending. "
+            "Use when you want to message a client, or to escalate an unanswered question to Noah. "
+            "ALWAYS confirm with the user before calling — tell them exactly who will receive the SMS and what it says."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "recipient": {
+                    "type": "string",
+                    "description": "Who to text: 'Noah' for the owner, or a client full name (e.g. 'Jane Smith')."
+                },
+                "message": {
+                    "type": "string",
+                    "description": "The text message body."
+                },
+                "context": {
+                    "type": "string",
+                    "description": "Optional: the original employee question or context (for escalations — helps knowledge base matching when Noah replies)."
+                }
+            },
+            "required": ["recipient", "message"]
         }
     }
 }

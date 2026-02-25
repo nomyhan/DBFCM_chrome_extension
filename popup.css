@@ -33,7 +33,7 @@ body {
 }
 
 .header h1 {
-    font-size: 20px;
+    font-size: 17px;
     font-weight: 600;
 }
 
@@ -625,15 +625,16 @@ body {
 
 .tab-btn {
     flex: 1;
-    padding: 12px 20px;
+    padding: 10px 4px;
     border: none;
     background: transparent;
-    font-size: 14px;
+    font-size: 12px;
     font-weight: 600;
     color: #888;
     cursor: pointer;
     transition: all 0.2s;
     position: relative;
+    white-space: nowrap;
 }
 
 .tab-btn:hover {
@@ -1368,6 +1369,31 @@ body {
 
 /* ===== Conflict Check Row (in settings panel) ===== */
 
+.restart-row {
+    display: flex;
+    gap: 8px;
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid #f0f0f0;
+}
+
+.btn-restart {
+    flex: 1;
+    background: #f8f9fa;
+    color: #555;
+    border: 1px solid #ddd;
+    font-size: 12px;
+    padding: 6px 10px;
+}
+
+.btn-restart:hover { background: #e9ecef; color: #333; }
+
+.btn-restart.working {
+    background: #fff8e1;
+    color: #856404;
+    border-color: #ffc107;
+}
+
 .conflict-check-row {
     display: flex;
     align-items: center;
@@ -1704,4 +1730,329 @@ body {
 .bk-status { font-size: 11px; margin-top: 8px; min-height: 16px; }
 .bk-success { color: #2e7d32; }
 .bk-error   { color: #c62828; }
+
+/* ── Checkout Tab ────────────────────────────────────────────────────────────── */
+
+.checkout-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 12px;
+    background: #f0f7ff;
+    border-bottom: 1px solid #c5daf7;
+    font-size: 12px;
+    flex-shrink: 0;
+}
+.checkout-toolbar-note {
+    color: #1a4a8a;
+}
+.checkout-toolbar-refresh {
+    background: none;
+    border: 1px solid #bbb;
+    border-radius: 4px;
+    padding: 3px 8px;
+    font-size: 12px;
+    cursor: pointer;
+    color: #444;
+}
+.checkout-toolbar-refresh:hover { background: #e8f0fe; }
+
+.checkout-card {
+    border: 1px solid #e0e0e0;
+    border-radius: 8px;
+    margin: 10px 12px;
+    background: #fff;
+    overflow: hidden;
+}
+
+.checkout-card-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    padding: 9px 12px 7px;
+    background: #f7f9fc;
+    border-bottom: 1px solid #e8edf4;
+}
+
+.checkout-card-time {
+    font-weight: 700;
+    font-size: 14px;
+    color: #667eea;
+    min-width: 60px;
+}
+
+.checkout-card-client {
+    font-weight: 600;
+    font-size: 14px;
+    color: #222;
+    flex: 1;
+    margin-left: 8px;
+}
+
+.checkout-card-body {
+    padding: 8px 12px 10px;
+}
+
+.checkout-pet-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: #444;
+    margin-bottom: 3px;
+}
+
+.checkout-pet-name {
+    font-weight: 600;
+    color: #333;
+}
+
+.checkout-pet-groomer {
+    color: #667eea;
+    font-size: 11px;
+}
+
+.checkout-divider {
+    border: none;
+    border-top: 1px solid #f0f0f0;
+    margin: 7px 0;
+}
+
+.checkout-card-info {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+
+.checkout-card-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: #444;
+}
+
+.checkout-card-icon {
+    font-size: 13px;
+    flex-shrink: 0;
+}
+
+.checkout-card-label {
+    color: #888;
+    font-size: 11px;
+    min-width: 28px;
+}
+
+.checkout-card-value {
+    font-weight: 600;
+    color: #222;
+    font-size: 12px;
+    font-family: 'Courier New', monospace;
+}
+
+.checkout-card-alt {
+    color: #aaa;
+    font-style: italic;
+    font-size: 11px;
+}
+
+.checkout-tip-row {
+    display: flex;
+    gap: 14px;
+    font-size: 12px;
+    margin-top: 4px;
+    flex-wrap: wrap;
+}
+
+.checkout-tip-item {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+}
+
+.checkout-tip-label {
+    font-size: 10px;
+    color: #999;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+}
+
+.checkout-tip-value {
+    font-weight: 600;
+    color: #333;
+    font-size: 13px;
+}
+
+.checkout-cadence-row {
+    font-size: 11px;
+    color: #666;
+    margin-top: 4px;
+}
+
+.checkout-no-card {
+    font-size: 11px;
+    color: #aaa;
+    font-style: italic;
+}
+
+.checkout-done-badge {
+    display: inline-block;
+    background: #e8f5e9;
+    color: #2e7d32;
+    font-size: 10px;
+    font-weight: 700;
+    padding: 1px 6px;
+    border-radius: 4px;
+    margin-left: 4px;
+}
+
+.checkout-next-appt {
+    color: #1a4a8a;
+    font-weight: 500;
+}
+
+.checkout-no-appt {
+    color: #dc3545;
+    font-weight: 700;
+}
+
+.checkout-conflict-badge {
+    background: #dc3545;
+    color: white;
+    font-size: 10px;
+    font-weight: 700;
+    padding: 1px 6px;
+    border-radius: 4px;
+    margin-left: 4px;
+}
+
+.checkout-tip-method-badge {
+    display: inline-block;
+    background: #e8f5e9;
+    color: #2e7d32;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: 4px;
+    margin-left: 4px;
+}
+
+.checkout-suggest-box {
+    background: #fffbeb;
+    border-left: 3px solid #d97706;
+    border-radius: 4px;
+    padding: 6px 10px;
+    font-size: 11px;
+    color: #78350f;
+    margin-top: 5px;
+}
+.checkout-suggest-date {
+    font-weight: 700;
+    color: #92400e;
+}
+
+/* ── SMS feedback / regen ─────────────────────────────────────────────────── */
+
+.sms-feedback-row {
+    display: flex;
+    gap: 6px;
+    margin: 0 0 8px;
+    align-items: center;
+}
+.sms-feedback-input {
+    flex: 1;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    padding: 5px 8px;
+    font-size: 11px;
+    font-family: inherit;
+    color: #444;
+    min-width: 0;
+}
+.sms-feedback-input:focus {
+    outline: none;
+    border-color: #1976d2;
+}
+.sms-btn-regen {
+    background: transparent;
+    color: #1976d2;
+    border: 1px solid #1976d2;
+    padding: 5px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 11px;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+.sms-btn-regen:hover    { background: #e3f2fd; }
+.sms-btn-regen:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ── SMS compose bar ─────────────────────────────────────────────────────── */
+
+.sms-compose-bar {
+    display: flex;
+    gap: 6px;
+    padding: 7px 10px;
+    background: #f0f7ff;
+    border-bottom: 1px solid #c5daf7;
+    flex-shrink: 0;
+}
+#sms-compose-input {
+    flex: 1;
+    border: 1px solid #c0d0e8;
+    border-radius: 4px;
+    padding: 5px 9px;
+    font-size: 12px;
+    font-family: inherit;
+    min-width: 0;
+    background: white;
+}
+#sms-compose-input:focus {
+    outline: none;
+    border-color: #1976d2;
+}
+#sms-compose-btn {
+    background: #1976d2;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    padding: 5px 12px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+#sms-compose-btn:hover    { background: #1565c0; }
+#sms-compose-btn:disabled { background: #90caf9; cursor: not-allowed; }
+.sms-compose-status {
+    padding: 4px 10px;
+    font-size: 11px;
+    background: #f8f8f8;
+    border-bottom: 1px solid #eee;
+    color: #555;
+    flex-shrink: 0;
+}
+.sms-compose-status.error { color: #c00; background: #fff0f0; }
+
+/* ── SMS thread (prior messages) ─────────────────────────────────────────── */
+
+.sms-thread {
+    background: #f4f4f4;
+    border-radius: 4px;
+    padding: 5px 8px;
+    margin-bottom: 6px;
+    max-height: 80px;
+    overflow-y: auto;
+    font-size: 11px;
+    line-height: 1.35;
+}
+.sms-thread-msg {
+    color: #999;
+    margin-bottom: 1px;
+    word-break: break-word;
+}
+.sms-thread-msg.us {
+    color: #555;
+}
 

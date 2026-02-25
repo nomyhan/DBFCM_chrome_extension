@@ -57,8 +57,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     cancelSettingsBtn.addEventListener('click', () => {
         settingsPanel.classList.add('hidden');
         loadConfigToInputs();
+
     });
     backendStatusBtn.addEventListener('click', checkBackendStatus);
+
+    document.getElementById('restart-backend-btn').addEventListener('click', restartBackend);
+    document.getElementById('reload-extension-btn').addEventListener('click', () => chrome.runtime.reload());
 
     // Tab switching
     document.querySelectorAll('.tab-btn').forEach(btn => {
@@ -134,6 +138,8 @@ function switchTab(tab) {
 
     // Auto-load SMS tab when switched to
     if (tab === 'sms') loadSmsDrafts();
+    // Auto-load Checkout tab when switched to
+    if (tab === 'checkout') loadCheckout();
 }
 
 // Load configuration from storage
@@ -222,6 +228,8 @@ async function refreshData() {
         }
     } else if (currentTab === 'sms') {
         await loadSmsDrafts();
+    } else if (currentTab === 'checkout') {
+        await loadCheckout();
     }
 
     setTimeout(() => {
@@ -657,10 +665,10 @@ function displayWaitlist(data) {
     };
 
     const groupOrder = [
-        { key: 'kumi',     label: '✂️ Kumi',        bg: '#fffbf0', border: '#e8a000' },
-        { key: 'tomoko',   label: '✂️ Tomoko',      bg: '#f0f8ff', border: '#17a2b8' },
-        { key: 'mandilyn', label: '✂️ Mandilyn',    bg: '#f0fff4', border: '#28a745' },
-        { key: 'flexible', label: '↔ Any Groomer', bg: '#f8f9fa', border: '#adb5bd' },
+        { key: 'kumi',     label: '✂️ Kumi',        bg: '#fffbeb', border: '#d97706' },
+        { key: 'tomoko',   label: '✂️ Tomoko',      bg: '#eff6ff', border: '#2563eb' },
+        { key: 'mandilyn', label: '✂️ Mandilyn',    bg: '#f5f3ff', border: '#7c3aed' },
+        { key: 'flexible', label: '↔ Any Groomer', bg: '#f8f9fa', border: '#9ca3af' },
     ];
 
     let html = '';
@@ -1339,6 +1347,41 @@ async function resetChat() {
     chatInput.focus();
 }
 
+async function restartBackend() {
+    const btn = document.getElementById('restart-backend-btn');
+    btn.textContent = '↺ Restarting…';
+    btn.classList.add('working');
+    btn.disabled = true;
+    try {
+        await fetch(`${config.backendUrl}/api/restart`, { method: 'POST',
+            headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    } catch (e) {
+        // Expected — server drops the connection as it exits
+    }
+    // Poll until backend is back up (up to 15s)
+    let attempts = 0;
+    const poll = setInterval(async () => {
+        attempts++;
+        try {
+            await fetch(`${config.backendUrl}/api/groomers`);
+            clearInterval(poll);
+            btn.textContent = '✓ Backend ready';
+            btn.classList.remove('working');
+            setTimeout(() => {
+                btn.textContent = '↺ Restart Backend';
+                btn.disabled = false;
+            }, 2000);
+        } catch (e) {
+            if (attempts >= 30) {
+                clearInterval(poll);
+                btn.textContent = '✗ Timed out';
+                btn.classList.remove('working');
+                setTimeout(() => { btn.textContent = '↺ Restart Backend'; btn.disabled = false; }, 3000);
+            }
+        }
+    }, 500);
+}
+
 async function checkBackendStatus() {
     try {
         const response = await fetch(`${config.backendUrl}/api/groomers`);
@@ -1368,9 +1411,180 @@ async function checkBackendStatus() {
     }
 }
 
+// ── Checkout Tab ──────────────────────────────────────────────────────────────
+
+document.getElementById('checkout-refresh-btn').addEventListener('click', loadCheckout);
+
+async function loadCheckout() {
+    const container = document.getElementById('checkout-content');
+    showLoading(container, 'Loading today\'s appointments…');
+    try {
+        const resp = await fetch(`${config.backendUrl}/api/checkout/today`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        renderCheckout(data.clients || []);
+    } catch (e) {
+        container.innerHTML = `<div class="empty-state"><p style="color:#c00">Could not reach backend: ${escapeHtml(e.message)}</p></div>`;
+    }
+}
+
+function renderCheckout(clients) {
+    const container = document.getElementById('checkout-content');
+    if (clients.length === 0) {
+        container.innerHTML = `
+            <div class="empty-state">
+                <h2>All done!</h2>
+                <p>No remaining appointments for today.</p>
+            </div>`;
+        return;
+    }
+
+    container.innerHTML = '';
+    clients.forEach(client => {
+        const card = document.createElement('div');
+        card.className = 'checkout-card';
+
+        // Pets list
+        const petsHtml = (client.pets || []).map(p => `
+            <div class="checkout-pet-row">
+                <span>${p.done ? '✅' : '🔄'}</span>
+                <span class="checkout-pet-name">${escapeHtml(p.name)}</span>
+                ${p.groomer ? `<span class="checkout-pet-groomer">→ ${escapeHtml(p.groomer)}</span>` : ''}
+                ${p.done ? '<span class="checkout-done-badge">Ready</span>' : ''}
+            </div>`).join('');
+
+        // Cards on file
+        let cardsHtml = '';
+        if (client.cards && client.cards.length > 0) {
+            cardsHtml = client.cards.map(c => {
+                const label = (c.desc && c.desc.trim()) ? escapeHtml(c.desc) : `****${escapeHtml(c.last4)}`;
+                return `<div class="checkout-card-row">
+                    <span class="checkout-card-icon">💳</span>
+                    <span class="checkout-card-value">${label}</span>
+                </div>`;
+            }).join('');
+        } else {
+            cardsHtml = `<div class="checkout-card-row"><span class="checkout-no-card">No card on file</span></div>`;
+        }
+
+        // Tip info
+        let tipHtml = '';
+        const avgPct  = client.avg_tip_pct  != null ? client.avg_tip_pct  : null;
+        const avgAmt  = client.avg_tip_amt  != null ? client.avg_tip_amt  : null;
+        const lastPct = client.last_tip_pct != null ? client.last_tip_pct : null;
+        const lastAmt = client.last_tip_amt != null ? client.last_tip_amt : null;
+        const method  = client.tip_method  || null;
+
+        const hasTip = (avgPct != null || lastPct != null);
+        if (hasTip) {
+            const methodBadge = method ? `<span class="checkout-tip-method-badge">${escapeHtml(method)}</span>` : '';
+            const avgLine = avgPct != null
+                ? `<div class="checkout-tip-item">
+                    <span class="checkout-tip-label">Avg tip</span>
+                    <span class="checkout-tip-value">${Math.round(avgPct)}%${avgAmt != null ? ` ($${parseFloat(avgAmt).toFixed(0)})` : ''}${methodBadge}</span>
+                   </div>`
+                : '';
+            const lastLine = lastPct != null
+                ? `<div class="checkout-tip-item">
+                    <span class="checkout-tip-label">Last</span>
+                    <span class="checkout-tip-value">${Math.round(lastPct)}%${lastAmt != null ? ` ($${parseFloat(lastAmt).toFixed(0)})` : ''}</span>
+                   </div>`
+                : '';
+            tipHtml = `<div class="checkout-tip-row">${avgLine}${lastLine}</div>`;
+        }
+
+        // Cadence / day preference
+        let cadenceHtml = '';
+        const prefDay  = client.preferred_day   || null;
+        const cadWeeks = client.avg_cadence_days != null ? Math.round(client.avg_cadence_days / 7) : null;
+        if (prefDay || cadWeeks) {
+            const parts = [];
+            if (prefDay)   parts.push(`Prefers ${escapeHtml(prefDay)}`);
+            if (cadWeeks)  parts.push(`every ~${cadWeeks} wks`);
+            cadenceHtml = `<div class="checkout-cadence-row">${parts.join('  ·  ')}</div>`;
+        }
+
+        // Next appointment + conflict
+        let nextApptHtml = '';
+        const count = client.future_appt_count || 0;
+        const conflict = client.has_conflict;
+        if (count > 0) {
+            const countLabel = `${count} appt${count !== 1 ? 's' : ''} booked`;
+            const nextLabel = client.next_appt ? ` · next ${escapeHtml(client.next_appt)}` : '';
+            const conflictFlag = conflict ? ' <span class="checkout-conflict-badge">⚠️ CONFLICT</span>' : '';
+            nextApptHtml = `<div class="checkout-cadence-row checkout-next-appt">${escapeHtml(countLabel)}${nextLabel}${conflictFlag}</div>`;
+        } else {
+            const suggestHtml = client.suggested_next
+                ? `<div class="checkout-suggest-box">Suggest booking around <span class="checkout-suggest-date">${escapeHtml(client.suggested_next)}</span>${client.preferred_day ? ` (${escapeHtml(client.preferred_day)})` : ''}</div>`
+                : '';
+            nextApptHtml = `<div class="checkout-cadence-row checkout-no-appt">⚠️ No future appointment booked</div>${suggestHtml}`;
+        }
+
+        const hasFinancial = (client.cards && client.cards.length > 0) || hasTip || (prefDay || cadWeeks);
+
+        card.innerHTML = `
+            <div class="checkout-card-header">
+                <span class="checkout-card-time">${escapeHtml(client.in_time || '')}</span>
+                <span class="checkout-card-client">${escapeHtml(client.client_name)}</span>
+            </div>
+            <div class="checkout-card-body">
+                ${petsHtml}
+                ${hasFinancial ? '<hr class="checkout-divider">' : ''}
+                <div class="checkout-card-info">
+                    ${cardsHtml}
+                    ${tipHtml}
+                    ${cadenceHtml}
+                    ${nextApptHtml}
+                </div>
+            </div>`;
+
+        container.appendChild(card);
+    });
+}
+
 // ── SMS Draft+Approve ─────────────────────────────────────────────────────────
 
 document.getElementById('sms-refresh-btn').addEventListener('click', loadSmsDrafts);
+
+// Compose bar
+const smsComposeInput = document.getElementById('sms-compose-input');
+const smsComposeBtn   = document.getElementById('sms-compose-btn');
+const smsComposeStatus = document.getElementById('sms-compose-status');
+
+smsComposeBtn.addEventListener('click', () => composeSmsMessage());
+smsComposeInput.addEventListener('keydown', e => { if (e.key === 'Enter') composeSmsMessage(); });
+
+async function composeSmsMessage() {
+    const instruction = smsComposeInput.value.trim();
+    if (!instruction) { smsComposeInput.focus(); return; }
+    smsComposeBtn.disabled = true;
+    smsComposeBtn.textContent = '…';
+    smsComposeStatus.textContent = 'Drafting…';
+    smsComposeStatus.className = 'sms-compose-status';
+    try {
+        const resp = await fetch(`${config.backendUrl}/api/sms/compose`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ instruction })
+        });
+        const data = await resp.json();
+        if (data.success) {
+            smsComposeInput.value = '';
+            smsComposeStatus.textContent = `✓ Drafted for ${data.client_name}`;
+            setTimeout(() => smsComposeStatus.classList.add('hidden'), 3000);
+            await loadSmsDrafts();
+        } else {
+            smsComposeStatus.textContent = 'Error: ' + (data.error || 'Unknown error');
+            smsComposeStatus.className = 'sms-compose-status error';
+        }
+    } catch (e) {
+        smsComposeStatus.textContent = 'Could not reach backend: ' + e.message;
+        smsComposeStatus.className = 'sms-compose-status error';
+    } finally {
+        smsComposeBtn.disabled = false;
+        smsComposeBtn.textContent = 'Draft';
+    }
+}
 
 async function loadSmsDrafts() {
     const container = document.getElementById('sms-content');
@@ -1414,15 +1628,37 @@ function renderSmsDrafts(drafts) {
         card.dataset.draftId = d.draft_id;
 
         const ts = d.timestamp ? d.timestamp.replace('T', ' ').slice(0, 16) : '';
+
+        // Build prior thread HTML (messages before the trigger)
+        const priorMsgs = d.recent_conversation || [];
+        const threadHtml = priorMsgs.length > 0
+            ? `<div class="sms-thread">${priorMsgs.map(m => {
+                const isUs = m.startsWith('Us:');
+                const text = m.replace(/^(Us|Client):\s*/, '');
+                const label = isUs ? 'Us' : escapeHtml(d.client_name.split(' ')[0]);
+                return `<div class="sms-thread-msg ${isUs ? 'us' : ''}">${label}: ${escapeHtml(text)}</div>`;
+              }).join('')}</div>`
+            : '';
+
+        // Inbound trigger section (hidden for outbound-initiated drafts)
+        const inboundHtml = d.their_message
+            ? `<div class="sms-inbound-label">They wrote:</div>
+               <div class="sms-inbound">${escapeHtml(d.their_message)}</div>`
+            : '';
+
         card.innerHTML = `
             <div class="sms-card-header">
                 <span>${escapeHtml(d.client_name)}</span>
                 <span class="sms-timestamp">${escapeHtml(ts)}</span>
             </div>
-            <div class="sms-inbound-label">They wrote:</div>
-            <div class="sms-inbound">${escapeHtml(d.their_message)}</div>
-            <div class="sms-draft-label">${d.draft ? 'Claude draft:' : 'No draft — compose reply:'}</div>
+            ${threadHtml}
+            ${inboundHtml}
+            <div class="sms-draft-label">${d.draft ? 'Draft:' : 'Compose reply:'}</div>
             <textarea class="sms-draft-textarea" rows="3">${escapeHtml(d.draft)}</textarea>
+            <div class="sms-feedback-row">
+                <input type="text" class="sms-feedback-input" placeholder="Feedback for Claude (e.g. make it shorter, offer Sat instead)…">
+                <button class="sms-btn-regen">↺ Regen</button>
+            </div>
             <div class="sms-card-actions">
                 <button class="sms-btn-dismiss">Dismiss</button>
                 <button class="sms-btn-book">Book Appt</button>
@@ -1434,6 +1670,14 @@ function renderSmsDrafts(drafts) {
             const message = textarea.value.trim();
             if (!message) { alert('Message is empty.'); return; }
             await sendSmsDraft(d.draft_id, d.client_id, d.phone, message, card);
+        });
+
+        card.querySelector('.sms-btn-regen').addEventListener('click', async () => {
+            const feedbackInput = card.querySelector('.sms-feedback-input');
+            const feedback = feedbackInput.value.trim();
+            if (!feedback) { feedbackInput.focus(); feedbackInput.placeholder = 'Enter feedback first…'; return; }
+            await regenerateSmsDraft(d.draft_id, feedback, card);
+            feedbackInput.value = '';
         });
 
         card.querySelector('.sms-btn-book').addEventListener('click', () => {
@@ -1548,6 +1792,33 @@ async function dismissSmsDraft(draftId, cardEl) {
         document.getElementById('sms-content').innerHTML = `
             <div class="empty-state"><h2>No pending drafts</h2>
             <p>When clients text in, Claude will draft replies here for your review.</p></div>`;
+    }
+}
+
+async function regenerateSmsDraft(draftId, feedback, cardEl) {
+    const regenBtn = cardEl.querySelector('.sms-btn-regen');
+    const textarea = cardEl.querySelector('.sms-draft-textarea');
+    regenBtn.disabled = true;
+    regenBtn.textContent = '…';
+    try {
+        const resp = await fetch(`${config.backendUrl}/api/sms/regen`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ draft_id: draftId, feedback })
+        });
+        const data = await resp.json();
+        if (data.success && data.draft) {
+            textarea.value = data.draft;
+            textarea.style.borderColor = '#2563eb';
+            setTimeout(() => textarea.style.borderColor = '', 1200);
+        } else {
+            alert('Regen failed: ' + (data.error || 'Unknown error'));
+        }
+    } catch (e) {
+        alert('Regen error: ' + e.message);
+    } finally {
+        regenBtn.disabled = false;
+        regenBtn.textContent = '↺ Regen';
     }
 }
 

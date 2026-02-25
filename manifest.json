@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Kennel Connection Tools",
+  "name": "DBFCM Tools",
   "version": "1.2.0",
-  "description": "Kennel Connection tools: waitlist viewer with LiveAccess links and groomer availability finder",
+  "description": "DBFCM Tools: waitlist, availability, SMS drafts, and checkout dashboard",
   "permissions": [
     "storage",
     "sidePanel",
@@ -18,7 +18,7 @@
     "http://127.0.0.1:*/*"
   ],
   "action": {
-    "default_title": "Open Kennel Connection Tools",
+    "default_title": "Open DBFCM Tools",
     "default_icon": {
       "16": "icons/icon16.png",
       "48": "icons/icon48.png",

@@ -3,13 +3,13 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Kennel Connection</title>
+    <title>Dog's Best Friend</title>
     <link rel="stylesheet" href="popup.css">
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <h1>🐾 Kennel Connection</h1>
+            <h1>🐾 Dog's Best Friend</h1>
             <div class="header-actions">
                 <button id="backend-status-btn" class="icon-btn backend-stopped" title="Backend server status">
                     <span class="backend-icon">⏹️</span>
@@ -28,6 +28,7 @@
             <button class="tab-btn" data-tab="availability">Availability</button>
             <button class="tab-btn" data-tab="chat">Know-a-bot</button>
             <button class="tab-btn" data-tab="sms">SMS <span id="sms-badge" class="sms-badge hidden">0</span></button>
+            <button class="tab-btn" data-tab="checkout">Checkout</button>
         </div>
 
         <div id="settings-panel" class="settings-panel hidden">
@@ -52,6 +53,10 @@
             <div class="setting-actions">
                 <button id="save-settings" class="btn btn-primary">Save</button>
                 <button id="cancel-settings" class="btn btn-secondary">Cancel</button>
+            </div>
+            <div class="restart-row">
+                <button id="restart-backend-btn" class="btn btn-restart" title="Restart the Python backend server">↺ Restart Backend</button>
+                <button id="reload-extension-btn" class="btn btn-restart" title="Reload this Chrome extension">↺ Reload Extension</button>
             </div>
         </div>
 
@@ -147,9 +152,28 @@
                 <span class="sms-toolbar-note">⚠️ A KCApp tab must be open to send</span>
                 <button id="sms-refresh-btn" class="sms-toolbar-refresh" title="Refresh drafts">↻ Refresh</button>
             </div>
+            <div class="sms-compose-bar">
+                <input type="text" id="sms-compose-input" placeholder="e.g. Tell Natasha Hsieh that Basil is ready in 30 min…" autocomplete="off">
+                <button id="sms-compose-btn">Draft</button>
+            </div>
+            <div id="sms-compose-status" class="sms-compose-status hidden"></div>
             <div id="sms-content" class="content">
                 <div class="empty-state">
                     <h2>SMS Drafts</h2>
+                    <p>Loading…</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Checkout Tab -->
+        <div id="checkout-tab" class="tab-content">
+            <div class="checkout-toolbar">
+                <span class="checkout-toolbar-note">Today's remaining appointments — card on file &amp; tip history</span>
+                <button id="checkout-refresh-btn" class="checkout-toolbar-refresh" title="Refresh">↻ Refresh</button>
+            </div>
+            <div id="checkout-content" class="content">
+                <div class="empty-state">
+                    <h2>Checkout</h2>
                     <p>Loading…</p>
                 </div>
             </div>
