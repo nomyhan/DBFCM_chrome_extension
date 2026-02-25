@@ -1,8 +1,12 @@
 # Auto-generated at backend startup (contains machine-specific WSL paths)
 noahbot_mcp_config.json
 
-# Runtime state (changes on every conflict check)
+# Runtime state (changes frequently, machine-specific)
 conflict_cache.json
+sms_drafts.json
+
+# Per-machine settings (contains credentials — never commit)
+config.local.json
 
 # Python bytecode
 __pycache__/

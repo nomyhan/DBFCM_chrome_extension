@@ -1,0 +1,16 @@
+{
+  "_comment": "Copy this file to config.local.json and customize for this machine. config.local.json is gitignored.",
+
+  "wsl_claude_path": "/home/YOUR_WSL_USERNAME/.local/bin/claude",
+
+  "sql_server": "desktop-bikigbr,2721",
+  "sql_database": "wkennel7",
+
+  "sql_auth": "sql",
+  "sql_user": "noah",
+  "sql_password": "noah"
+
+  // For Windows Authentication (front desk machine), use:
+  // "sql_auth": "windows"
+  // and omit sql_user / sql_password
+}

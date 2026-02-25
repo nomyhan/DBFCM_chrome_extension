@@ -18,24 +18,56 @@ import urllib.parse
 import urllib.request
 import urllib.error
 import socket
+import logging
 import time
 import uuid
 
 # Detect whether we're running on Windows or WSL/Linux
 IS_WINDOWS = platform.system() == 'Windows'
 
-# Per-machine settings (this file is shared via OneDrive)
-_HOSTNAME = socket.gethostname().upper()
+# Logging — console + file in the extension folder
+_LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backend.log')
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%H:%M:%S',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(_LOG_PATH, encoding='utf-8'),
+    ]
+)
+log = logging.getLogger('kennel')
 
-if _HOSTNAME == 'DESKTOP-BIKIGBR':
-    WSL_CLAUDE_PATH = '/home/frontdesk/.local/bin/claude'
-    SQL_AUTH_ARGS = ['-E']  # Windows Authentication
-elif _HOSTNAME == 'DESKTOP-79VVHA8':
-    WSL_CLAUDE_PATH = '/home/noah/.local/bin/claude'
-    SQL_AUTH_ARGS = ['-U', 'noah', '-P', 'noah']
+# Per-machine config — loaded from config.local.json (gitignored).
+# Falls back to defaults so existing setups work without the file.
+def _load_machine_config():
+    config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.local.json')
+    defaults = {
+        'wsl_claude_path': '/home/noah/.local/bin/claude',
+        'sql_server':      'desktop-bikigbr,2721',
+        'sql_database':    'wkennel7',
+        'sql_auth':        'sql',
+        'sql_user':        'noah',
+        'sql_password':    'noah',
+    }
+    if not os.path.exists(config_path):
+        log.warning('No config.local.json found — using defaults. '
+                    'Copy config.local.json.example to config.local.json to customize.')
+        return defaults
+    try:
+        with open(config_path) as f:
+            data = json.load(f)
+        return {**defaults, **data}
+    except Exception as e:
+        log.warning(f'Could not load config.local.json: {e} — using defaults')
+        return defaults
+
+_cfg = _load_machine_config()
+WSL_CLAUDE_PATH = _cfg['wsl_claude_path']
+if _cfg['sql_auth'] == 'windows':
+    SQL_AUTH_ARGS = ['-E']
 else:
-    WSL_CLAUDE_PATH = '/home/noah/.local/bin/claude'
-    SQL_AUTH_ARGS = ['-U', 'noah', '-P', 'noah']
+    SQL_AUTH_ARGS = ['-U', _cfg['sql_user'], '-P', _cfg['sql_password']]
 
 # MCP config path — written dynamically by _generate_mcp_config() at startup
 MCP_CONFIG_WSL_PATH = None
@@ -294,9 +326,9 @@ def _shell_run(cmd: str):
                 lines.append(decoded)
     return '\n'.join(lines), exit_code
 
-# SQL Server connection settings
-SQL_SERVER = "desktop-bikigbr,2721"
-SQL_DATABASE = "wkennel7"
+# SQL Server connection settings (from config.local.json or defaults)
+SQL_SERVER   = _cfg['sql_server']
+SQL_DATABASE = _cfg['sql_database']
 
 # ── SMS Draft+Approve state ──────────────────────────────────────────────────
 # Drafts keyed by str(inbound MessageId): {draft_id, message_id, client_id,
@@ -304,6 +336,36 @@ SQL_DATABASE = "wkennel7"
 _sms_drafts = {}
 _sms_drafts_lock = threading.Lock()
 _sms_last_seen_id = 0   # watermark: last inbound MessageId processed
+_SMS_DRAFTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'sms_drafts.json')
+
+def _save_sms_drafts():
+    """Persist _sms_drafts to disk so pending drafts survive a backend restart."""
+    try:
+        with _sms_drafts_lock:
+            snapshot = dict(_sms_drafts)
+        with open(_SMS_DRAFTS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(snapshot, f, indent=2)
+    except Exception as e:
+        log.warning(f'[SMS] Could not save drafts to disk: {e}')
+
+def _load_sms_drafts():
+    """Restore persisted drafts on startup. Also restores the watermark."""
+    global _sms_drafts, _sms_last_seen_id
+    if not os.path.exists(_SMS_DRAFTS_FILE):
+        return
+    try:
+        with open(_SMS_DRAFTS_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return
+        with _sms_drafts_lock:
+            _sms_drafts = data
+        if _sms_drafts:
+            _sms_last_seen_id = max(int(v['message_id']) for v in _sms_drafts.values())
+        log.info(f'[SMS] Restored {len(_sms_drafts)} pending draft(s) from disk '
+                 f'(watermark={_sms_last_seen_id})')
+    except Exception as e:
+        log.warning(f'[SMS] Could not load saved drafts: {e}')
 
 def _sql_query(query):
     """Run a sqlcmd query and return rows as list of stripped-field lists."""
@@ -322,6 +384,32 @@ def _sql_query(query):
             continue
         rows.append([c.strip() for c in line.split('\t')])
     return rows
+
+def _ensure_audit_tables():
+    """Create AgentAuditLog and AgentRunLog if they don't exist. Safe to run every startup."""
+    _sql_query(
+        "IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name='AgentAuditLog') "
+        "CREATE TABLE AgentAuditLog ("
+        "  AuditSeq INT IDENTITY(1,1) PRIMARY KEY, "
+        "  AuditTimestamp DATETIME DEFAULT GETDATE(), "
+        "  AgentName VARCHAR(50), ActionType VARCHAR(20), RiskTier INT DEFAULT 0, "
+        "  TargetTable VARCHAR(100), TargetKeys VARCHAR(500), Description VARCHAR(2000), "
+        "  SnapshotBefore VARCHAR(MAX), SqlExecuted VARCHAR(MAX), RollbackSql VARCHAR(MAX), "
+        "  Status VARCHAR(20) DEFAULT 'EXECUTED', VerifiedBy VARCHAR(50), "
+        "  VerifiedAt DATETIME, ErrorMessage VARCHAR(1000), SessionId VARCHAR(100)"
+        ")"
+    )
+    _sql_query(
+        "IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name='AgentRunLog') "
+        "CREATE TABLE AgentRunLog ("
+        "  RunSeq INT IDENTITY(1,1) PRIMARY KEY, "
+        "  AgentName VARCHAR(50), RunTimestamp DATETIME DEFAULT GETDATE(), "
+        "  RunType VARCHAR(20), ChecksRun INT DEFAULT 0, "
+        "  IssuesFound INT DEFAULT 0, IssuesAutoFixed INT DEFAULT 0, "
+        "  Summary VARCHAR(2000), DurationMs INT"
+        ")"
+    )
+    log.info('[Audit] Audit tables verified')
 
 def _build_multipart(fields):
     """Build multipart/form-data body from a plain string dict. Returns (body_bytes, content_type)."""
@@ -668,7 +756,8 @@ def _sms_poll_inbound():
                 'draft':         draft_text or '',
                 'timestamp':     timestamp,
             }
-        print(f"[SMS] Draft ready for {client_name}: {(draft_text or '')[:60]}…")
+        _save_sms_drafts()
+        log.info(f"[SMS] Draft ready for {client_name}: {(draft_text or '')[:60]}…")
 
     _sms_last_seen_id = new_max
 
@@ -1696,8 +1785,9 @@ class WaitlistHandler(BaseHTTPRequestHandler):
                 pass
             with _sms_drafts_lock:
                 _sms_drafts.pop(draft_id, None)
+            _save_sms_drafts()
 
-        print(f"[SMS] post-send: attributed msg {kcapp_msg_id} to Claude, draft {draft_id} resolved")
+        log.info(f"[SMS] post-send: attributed msg {kcapp_msg_id} to Claude, draft {draft_id} resolved")
         return {'success': True, 'message_id': kcapp_msg_id}
 
     def sms_dismiss_draft(self, data):
@@ -1707,6 +1797,8 @@ class WaitlistHandler(BaseHTTPRequestHandler):
             return {'success': False, 'error': 'draft_id required'}
         with _sms_drafts_lock:
             removed = _sms_drafts.pop(draft_id, None)
+        if removed is not None:
+            _save_sms_drafts()
         return {'success': True, 'removed': removed is not None}
 
     def sms_extract_appt(self, data):
@@ -1919,6 +2011,12 @@ def _run_client_stats_refresh():
 
 
 def run_server(port=8000):
+    # Ensure audit tables exist in SQL Server
+    _ensure_audit_tables()
+
+    # Restore any SMS drafts that were pending before last restart
+    _load_sms_drafts()
+
     # Generate MCP config JSON pointing to scripts in this extension folder
     _generate_mcp_config()
 
@@ -1934,28 +2032,18 @@ def run_server(port=8000):
     server_address = ('', port)
     httpd = HTTPServer(server_address, WaitlistHandler)
 
-    print("=" * 60)
-    print("Kennel Connection Backend Server")
-    print("=" * 60)
-    print(f"Server running on: http://localhost:{port}")
-    print(f"\nAPI endpoints:")
-    print(f"  GET  /api/waitlist              - Get waitlist entries")
-    print(f"  POST /api/waitlist/update-notes - Update waitlist notes")
-    print(f"  GET  /api/groomers              - Get active groomers")
-    print(f"  GET  /api/availability?groomer_id=X - Get next 10 available slots")
-    print(f"  POST /api/chat                  - Noah-bot chat message")
-    print(f"  POST /api/chat/reset            - Reset Noah-bot conversation")
-    print(f"  GET  /api/refresh-client-stats  - Rebuild client tip/cadence cache")
-    print(f"  GET  /api/sms/drafts            - Get pending SMS drafts")
-    print(f"  POST /api/sms/send              - Send SMS via KCApp + resolve draft")
-    print(f"  POST /api/sms/dismiss           - Dismiss a draft without sending")
-    print("\nPress Ctrl+C to stop the server")
-    print("=" * 60)
+    log.info('=' * 60)
+    log.info('Kennel Connection Backend Server')
+    log.info('=' * 60)
+    log.info(f'Server running on: http://localhost:{port}')
+    log.info(f'Log file: {_LOG_PATH}')
+    log.info('Press Ctrl+C to stop')
+    log.info('=' * 60)
 
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
-        print("\n\nServer stopped.")
+        log.info('Server stopped.')
         httpd.server_close()
 
 if __name__ == "__main__":
