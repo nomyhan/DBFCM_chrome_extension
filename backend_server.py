@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
-Backend server for Kennel Connection Chrome extension
+Backend server for DBFCM Tools Chrome extension
 Provides waitlist data and availability checking
 Run this on your Windows machine where you have SQL Server access
 """
+import sys
+sys.dont_write_bytecode = True  # prevent __pycache__ from appearing in the extension folder
 
 from http.server import HTTPServer, BaseHTTPRequestHandler
+import re
 import subprocess
 import json
 import os
@@ -38,10 +41,11 @@ logging.basicConfig(
 )
 log = logging.getLogger('kennel')
 
-# Per-machine config — loaded from config.local.json (gitignored).
-# Falls back to defaults so existing setups work without the file.
+# Per-machine config — loaded from config.<HOSTNAME>.json, then config.local.json (both gitignored).
+# This allows multiple machines sharing the same OneDrive folder to have separate configs.
 def _load_machine_config():
-    config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.local.json')
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    hostname = socket.gethostname().upper()
     defaults = {
         'wsl_claude_path': '/home/noah/.local/bin/claude',
         'sql_server':      'desktop-bikigbr,2721',
@@ -50,17 +54,23 @@ def _load_machine_config():
         'sql_user':        'noah',
         'sql_password':    'noah',
     }
-    if not os.path.exists(config_path):
-        log.warning('No config.local.json found — using defaults. '
-                    'Copy config.local.json.example to config.local.json to customize.')
-        return defaults
-    try:
-        with open(config_path) as f:
-            data = json.load(f)
-        return {**defaults, **data}
-    except Exception as e:
-        log.warning(f'Could not load config.local.json: {e} — using defaults')
-        return defaults
+    # Try hostname-specific file first, then generic fallback
+    candidates = [
+        os.path.join(script_dir, f'config.{hostname}.json'),
+        os.path.join(script_dir, 'config.local.json'),
+    ]
+    for config_path in candidates:
+        if os.path.exists(config_path):
+            try:
+                with open(config_path) as f:
+                    data = json.load(f)
+                log.info(f'Loaded config from {os.path.basename(config_path)}')
+                return {**defaults, **data}
+            except Exception as e:
+                log.warning(f'Could not load {os.path.basename(config_path)}: {e} — trying next')
+    log.warning(f'No config file found (tried config.{hostname}.json, config.local.json) — using defaults. '
+                'Copy config.local.json.example to get started.')
+    return defaults
 
 _cfg = _load_machine_config()
 WSL_CLAUDE_PATH = _cfg['wsl_claude_path']
@@ -82,6 +92,8 @@ MCP_ALLOWED_TOOLS = ','.join([
     'mcp__kennel-db__append_note',
     'mcp__kennel-db__create_appointment',
     'mcp__kennel-db__reassign_bather',
+    'mcp__kennel-db__add_to_knowledge_base',
+    'mcp__kennel-db__draft_sms',
 ])
 
 # Noah-bot session state
@@ -152,6 +164,7 @@ def build_noahbot_system_prompt():
         'ROSIE_AI_FAQ.md',
         'WKENNEL7_GROOMING_LEXICON.md',
         'SCHEDULING_CHEATSHEET.md',
+        'KNOWLEDGE_BASE.md',   # staff-curated rules added via Know-a-bot
     ]
 
     content = (
@@ -163,8 +176,19 @@ def build_noahbot_system_prompt():
         "Employee IDs: Tomoko=85, Kumi=59, Mandilyn=95, Elmer=8.\n\n"
         "FORMATTING: Plain text only. No markdown — no **, no ##, no bullet dashes, no tables. "
         "Use simple punctuation and line breaks to organize information.\n\n"
-        "CONFIRMATION RULE: Before calling any tool that writes to the database "
-        "(create_appointment, append_note, or reassign_bather), you MUST first send a confirmation message to the user. "
+        "CAT SERVICES POLICY: We currently have no cat groomer on staff. Do not book or suggest "
+        "any cat grooming services. The only exception is Sadie Donnelly's nail trim, which is "
+        "still accepted. If anyone asks about cat grooming, explain we are not currently offering it.\n\n"
+        "DRAFTING SMS: You can draft SMS messages using the draft_sms tool.\n"
+        "- To message a client: use their full name as the recipient.\n"
+        "- To escalate to Noah (the owner): use 'Noah' as the recipient and include the original\n"
+        "  employee question in the 'context' field. When Noah replies by text, his answer will\n"
+        "  be automatically added to the knowledge base.\n"
+        "- If you genuinely cannot answer a question after checking all available info, offer to\n"
+        "  escalate to Noah. Let the employee confirm before calling the tool.\n"
+        "- All drafted messages appear in the SMS tab for staff review before sending.\n\n"
+        "CONFIRMATION RULE: Before calling any tool that writes data "
+        "(create_appointment, append_note, reassign_bather, add_to_knowledge_base, or draft_sms), you MUST first send a confirmation message to the user. "
         "The message must: (1) describe in plain language exactly what you are about to do, "
         "(2) explain the real-world consequence in simple terms (e.g. 'This will add a real appointment "
         "to the live system that the client and groomers will see'), and (3) ask the user to confirm "
@@ -337,6 +361,55 @@ _sms_drafts = {}
 _sms_drafts_lock = threading.Lock()
 _sms_last_seen_id = 0   # watermark: last inbound MessageId processed
 _SMS_DRAFTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'sms_drafts.json')
+
+# ── Noah's personal cell numbers (for inbound routing) ───────────────────────
+# Texts from these numbers go to KB ingestion, not the staff SMS queue.
+NOAH_PHONE_NUMBERS = {'5106465763', '5103310678'}
+NOAH_CELL_PRIMARY  = '5106465763'  # used for outbound escalation drafts
+
+def _normalize_phone(phone: str) -> str:
+    """Strip all non-digit characters from a phone number string."""
+    return re.sub(r'\D', '', phone or '')
+
+def _is_noah_phone(phone: str) -> bool:
+    """Return True if the phone number belongs to Noah's personal cell."""
+    return _normalize_phone(phone) in NOAH_PHONE_NUMBERS
+
+# ── Sent escalations tracking ─────────────────────────────────────────────────
+# Tracks escalations sent to Noah so we can match his reply to the original question.
+_sent_escalations = {}  # draft_id -> {escalation_context, sent_at, matched}
+_PENDING_ESCALATIONS_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), 'staff', 'pending_escalations.json'
+)
+
+def _save_pending_escalations():
+    """Persist _sent_escalations to disk."""
+    try:
+        os.makedirs(os.path.dirname(_PENDING_ESCALATIONS_FILE), exist_ok=True)
+        with open(_PENDING_ESCALATIONS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(_sent_escalations, f, indent=2)
+    except Exception as e:
+        log.warning(f'[SMS] Could not save pending escalations: {e}')
+
+def _load_pending_escalations():
+    """Load persisted escalations, expiring entries older than 7 days."""
+    global _sent_escalations
+    if not os.path.exists(_PENDING_ESCALATIONS_FILE):
+        return
+    try:
+        with open(_PENDING_ESCALATIONS_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return
+        cutoff = (datetime.now() - timedelta(days=7)).isoformat()
+        _sent_escalations = {
+            k: v for k, v in data.items()
+            if v.get('sent_at', '') >= cutoff and not v.get('matched')
+        }
+        if _sent_escalations:
+            log.info(f'[SMS] Loaded {len(_sent_escalations)} pending escalation(s)')
+    except Exception as e:
+        log.warning(f'[SMS] Could not load pending escalations: {e}')
 
 def _save_sms_drafts():
     """Persist _sms_drafts to disk so pending drafts survive a backend restart."""
@@ -652,6 +725,98 @@ def _run_one_shot_claude(system_text, user_msg, timeout=60):
         print(f"[Claude] exception: {e}")
     return None
 
+def _sms_lookup_client(name_query):
+    """Look up a client by 'FirstName LastName' or 'pet:PetName'. Returns dict or None."""
+    q = name_query.strip().replace("'", "").replace('"', '')  # sanitize quotes
+    if q.lower().startswith('pet:'):
+        pet = q[4:].strip()
+        rows = _sql_query(
+            f"SELECT TOP 1 c.CLSeq, c.CLFirstName, c.CLLastName, c.CLPhone1 "
+            f"FROM Clients c INNER JOIN Pets p ON p.PtOwnerCode=c.CLSeq "
+            f"WHERE p.PtPetName LIKE '%{pet}%' "
+            f"AND (c.CLDeleted IS NULL OR c.CLDeleted=0) "
+            f"AND (p.PtDeleted IS NULL OR p.PtDeleted=0)")
+    else:
+        parts = q.split()
+        if len(parts) >= 2:
+            fname, lname = parts[0], parts[-1]
+            rows = _sql_query(
+                f"SELECT TOP 1 CLSeq, CLFirstName, CLLastName, CLPhone1 FROM Clients "
+                f"WHERE CLFirstName LIKE '%{fname}%' AND CLLastName LIKE '%{lname}%' "
+                f"AND (CLDeleted IS NULL OR CLDeleted=0)")
+        else:
+            rows = _sql_query(
+                f"SELECT TOP 1 CLSeq, CLFirstName, CLLastName, CLPhone1 FROM Clients "
+                f"WHERE (CLFirstName LIKE '%{q}%' OR CLLastName LIKE '%{q}%') "
+                f"AND (CLDeleted IS NULL OR CLDeleted=0)")
+    if not rows or not rows[0] or len(rows[0]) < 4:
+        return None
+    r = rows[0]
+    phone = str(r[3] or '').strip().replace('(','').replace(')','').replace('-','').replace(' ','')
+    return {'client_id': int(r[0]), 'client_name': f"{r[1]} {r[2]}", 'phone': phone}
+
+
+def _suggest_next_date(avg_cadence_days, preferred_day):
+    """Compute suggested next appointment date from today + cadence, snapped to preferred day."""
+    from datetime import date, timedelta
+    cadence = float(avg_cadence_days) if avg_cadence_days else 42.0
+    target = date.today() + timedelta(days=cadence)
+    if preferred_day:
+        day_map = {'monday': 0, 'tuesday': 1, 'wednesday': 2, 'thursday': 3,
+                   'friday': 4, 'saturday': 5, 'sunday': 6}
+        wd = day_map.get(preferred_day.lower())
+        if wd is not None:
+            delta = (wd - target.weekday()) % 7
+            target = target + timedelta(days=delta)
+    return target.strftime('%m/%d/%Y')
+
+
+def _sms_regen_with_feedback(ctx, their_message, original_draft, feedback):
+    """Regenerate a draft SMS reply given user feedback on the previous draft."""
+    if not ctx:
+        return None
+
+    pets_str  = ', '.join(ctx['pets']) if ctx['pets'] else 'no pets on file'
+    appts_str = '; '.join(ctx['upcoming_appointments']) if ctx['upcoming_appointments'] else 'none upcoming'
+    conv_str  = '\n'.join(ctx['recent_conversation'][-8:]) if ctx['recent_conversation'] else 'No recent messages'
+
+    avail_block = ''
+    sched_rules = ''
+    if _sms_is_appointment_related(their_message):
+        try:
+            avail_text  = _sms_get_compact_availability()
+            avail_block = f"\n\nREAL OPEN SLOTS (use these exact dates/times when proposing):\n{avail_text}"
+            sched_rules = '\n\nSCHEDULING RULES:\n' + _sms_load_scheduling_doc()
+        except Exception as e:
+            print(f"[SMS] Availability lookup error in regen: {e}")
+
+    system = (
+        "You are drafting SMS replies for Dog's Best Friend grooming salon, writing as Noah (owner). "
+        "Style: concise, start with 'Hi [FirstName]', no emojis, no exclamation marks, "
+        "use 'we/us' for the business, professional but warm. "
+        "IMPORTANT: We currently have no cat groomer on staff. Do not offer or book any cat grooming. "
+        "The only exception is Sadie Donnelly's nail trim. "
+        "When the client is asking about or proposing an appointment:\n"
+        "  • If they propose a specific date/time, check the real open slots and confirm or offer the closest alternatives.\n"
+        "  • If they ask for availability, offer 2-3 specific real open slots for the right groomer.\n"
+        "  • Only suggest slots from the REAL OPEN SLOTS list — never invent times.\n"
+        "Respond with ONLY the message text — no quotes, no label, no explanation."
+        f"{sched_rules}"
+    )
+    user_msg = (
+        f"Client: {ctx['first_name']} {ctx['last_name']}\n"
+        f"Pets: {pets_str}\n"
+        f"Upcoming appointments: {appts_str}\n"
+        f"Recent conversation:\n{conv_str}"
+        f"{avail_block}\n\n"
+        f"They just wrote: \"{their_message}\"\n\n"
+        f"Previous draft: \"{original_draft}\"\n"
+        f"User feedback: {feedback}\n\n"
+        f"Revise the draft based on the feedback."
+    )
+    return _run_one_shot_claude(system, user_msg, timeout=90)
+
+
 def _sms_generate_draft(ctx, their_message):
     """Call Claude to generate a scheduling-aware draft SMS reply."""
     if not ctx:
@@ -677,6 +842,8 @@ def _sms_generate_draft(ctx, their_message):
         "You are drafting SMS replies for Dog's Best Friend grooming salon, writing as Noah (owner). "
         "Style: concise, start with 'Hi [FirstName]', no emojis, no exclamation marks, "
         "use 'we/us' for the business, professional but warm. "
+        "IMPORTANT: We currently have no cat groomer on staff. Do not offer or book any cat grooming. "
+        "The only exception is Sadie Donnelly's nail trim. "
         "When the client is asking about or proposing an appointment:\n"
         "  • If they propose a specific date/time, check the real open slots and confirm or offer the closest alternatives.\n"
         "  • If they ask for availability, offer 2-3 specific real open slots for the right groomer.\n"
@@ -695,6 +862,104 @@ def _sms_generate_draft(ctx, their_message):
     )
 
     return _run_one_shot_claude(system, user_msg, timeout=90)
+
+def _append_to_knowledge_base(category: str, content: str) -> bool:
+    """Append a new entry to staff/KNOWLEDGE_BASE.md. Returns True on success."""
+    kb_path = os.path.join(_get_ext_dir(), 'staff', 'KNOWLEDGE_BASE.md')
+    try:
+        os.makedirs(os.path.dirname(kb_path), exist_ok=True)
+        if not os.path.exists(kb_path):
+            with open(kb_path, 'w', encoding='utf-8') as f:
+                f.write('# DBFCM Staff Knowledge Base\n\nBusiness rules and policies.\n\n')
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M')
+        entry = f'\n## [{timestamp}] {category}\n\n{content}\n'
+        with open(kb_path, 'a', encoding='utf-8') as f:
+            f.write(entry)
+        log.info(f"[KB] Added entry under '{category}': {content[:80]}")
+        return True
+    except Exception as e:
+        log.warning(f'[KB] Could not write to knowledge base: {e}')
+        return False
+
+
+def _extract_kb_from_noah_reply(message: str, escalation_context: str):
+    """Use Claude to determine if Noah's SMS is KB-worthy. Returns (category, content) or None."""
+    kb_path = os.path.join(_get_ext_dir(), 'staff', 'KNOWLEDGE_BASE.md')
+    try:
+        with open(kb_path, 'r', encoding='utf-8') as f:
+            kb_text = f.read()[:3000]
+    except FileNotFoundError:
+        kb_text = '(empty)'
+
+    esc_line = ''
+    if escalation_context:
+        esc_line = f'\nThis message is a reply to the employee question: "{escalation_context}"'
+
+    system = (
+        "You are a knowledge base curator for a pet grooming salon. "
+        "Analyze the owner's text message and determine if it contains a policy, rule, or "
+        "operational fact worth adding to the staff knowledge base.\n"
+        "Respond with ONLY one of these two formats:\n\n"
+        "Format 1 (KB-worthy):\n"
+        "CATEGORY: [one of: Policies, Scheduling, Pricing, Services, Staff, Clients, Other]\n"
+        "CONTENT: [clear, concise statement of the rule or fact]\n\n"
+        "Format 2 (not KB-worthy — chitchat, acknowledgment, or already covered):\n"
+        "NOT_KB"
+    )
+    user_msg = (
+        f"Current knowledge base (first 3000 chars):\n{kb_text}\n\n"
+        f"{esc_line}\n"
+        f"Owner's message: \"{message}\"\n\n"
+        "Is this new, useful staff knowledge not already covered? "
+        "If yes, return CATEGORY and CONTENT. If no, return NOT_KB."
+    )
+
+    raw = _run_one_shot_claude(system, user_msg, timeout=45)
+    if not raw:
+        return None
+
+    raw = raw.strip()
+    if raw.upper().startswith('NOT_KB') or 'NOT_KB' in raw[:30]:
+        return None
+
+    cat_match     = re.search(r'CATEGORY:\s*(.+)', raw)
+    content_match = re.search(r'CONTENT:\s*(.+)', raw, re.DOTALL)
+    if cat_match and content_match:
+        return (cat_match.group(1).strip(), content_match.group(1).strip())
+    return None
+
+
+def _handle_noah_inbound(msg_id: int, phone: str, message: str, timestamp: str):
+    """Handle an inbound text from Noah: mark handled, check for KB content, optionally append."""
+    # Mark as handled immediately — don't show in staff SMS queue
+    _sms_mark_handled(msg_id)
+
+    # Find the most recent unmatched sent escalation (if any)
+    escalation_context = None
+    matched_draft_id   = None
+    sorted_escs = sorted(
+        _sent_escalations.items(),
+        key=lambda x: x[1].get('sent_at', ''),
+        reverse=True,
+    )
+    for draft_id, esc in sorted_escs:
+        if not esc.get('matched'):
+            escalation_context = esc.get('escalation_context', '')
+            matched_draft_id   = draft_id
+            break
+
+    # Ask Claude if the message is KB-worthy
+    kb_result = _extract_kb_from_noah_reply(message, escalation_context)
+
+    if kb_result:
+        category, content = kb_result
+        success = _append_to_knowledge_base(category, content)
+        if success and matched_draft_id:
+            _sent_escalations[matched_draft_id]['matched'] = True
+            _save_pending_escalations()
+
+    log.info(f"[SMS] Noah inbound processed: msg_id={msg_id}, kb_added={bool(kb_result)}")
+
 
 def _sms_poll_inbound():
     """Check for new inbound SMS messages and generate drafts. Called every 30s."""
@@ -733,6 +998,13 @@ def _sms_poll_inbound():
             continue
 
         new_max = max(new_max, msg_id)
+
+        # Route Noah's personal cell texts to KB ingestion, not the staff SMS queue
+        if _is_noah_phone(phone):
+            log.info(f"[SMS] Noah inbound MessageId={msg_id}, routing to KB handler")
+            _handle_noah_inbound(msg_id, phone, message, timestamp)
+            continue
+
         draft_key = str(msg_id)
 
         with _sms_drafts_lock:
@@ -745,16 +1017,20 @@ def _sms_poll_inbound():
         client_name = f"{ctx['first_name']} {ctx['last_name']}" if ctx else f"Client {client_id or phone}"
         draft_text  = _sms_generate_draft(ctx, message) if ctx else None
 
+        # Store the prior conversation thread (exclude the trigger message itself)
+        prior_thread = ctx['recent_conversation'][:-1] if ctx and ctx.get('recent_conversation') else []
+
         with _sms_drafts_lock:
             _sms_drafts[draft_key] = {
-                'draft_id':      draft_key,
-                'message_id':    msg_id,
-                'client_id':     client_id,
-                'client_name':   client_name,
-                'phone':         phone,
-                'their_message': message,
-                'draft':         draft_text or '',
-                'timestamp':     timestamp,
+                'draft_id':           draft_key,
+                'message_id':         msg_id,
+                'client_id':          client_id,
+                'client_name':        client_name,
+                'phone':              phone,
+                'their_message':      message,
+                'recent_conversation': prior_thread,
+                'draft':              draft_text or '',
+                'timestamp':          timestamp,
             }
         _save_sms_drafts()
         log.info(f"[SMS] Draft ready for {client_name}: {(draft_text or '')[:60]}…")
@@ -814,6 +1090,9 @@ class WaitlistHandler(BaseHTTPRequestHandler):
         elif parsed_path.path == '/api/sms/drafts':
             data = self.sms_get_drafts()
             self.wfile.write(json.dumps(data).encode())
+        elif parsed_path.path == '/api/checkout/today':
+            data = self.get_checkout_today()
+            self.wfile.write(json.dumps(data).encode())
         else:
             self.wfile.write(json.dumps({'error': 'Not found'}).encode())
 
@@ -836,7 +1115,19 @@ class WaitlistHandler(BaseHTTPRequestHandler):
             self.send_error_response(400, 'Invalid JSON')
             return
 
-        if parsed_path.path == '/api/waitlist/update-notes':
+        if parsed_path.path == '/api/restart':
+            self.send_json_response({'success': True, 'message': 'Restarting…'})
+            def _restart():
+                import time
+                time.sleep(0.4)
+                subprocess.Popen(
+                    [sys.executable, os.path.abspath(__file__)] + sys.argv[1:],
+                    creationflags=subprocess.CREATE_NEW_CONSOLE if IS_WINDOWS else 0
+                )
+                os._exit(0)
+            threading.Thread(target=_restart, daemon=True).start()
+            return
+        elif parsed_path.path == '/api/waitlist/update-notes':
             result = self.update_notes(data)
             self.send_json_response(result)
         elif parsed_path.path == '/api/chat':
@@ -857,6 +1148,18 @@ class WaitlistHandler(BaseHTTPRequestHandler):
             self.send_json_response(result)
         elif parsed_path.path == '/api/sms/dismiss':
             result = self.sms_dismiss_draft(data)
+            self.send_json_response(result)
+        elif parsed_path.path == '/api/sms/regen':
+            result = self.sms_regen_draft(data)
+            self.send_json_response(result)
+        elif parsed_path.path == '/api/sms/queue-outbound':
+            result = self.sms_queue_outbound(data)
+            self.send_json_response(result)
+        elif parsed_path.path == '/api/sms/compose':
+            result = self.sms_compose(data)
+            self.send_json_response(result)
+        elif parsed_path.path == '/api/sms/draft-from-knowabot':
+            result = self.sms_draft_from_knowabot(data)
             self.send_json_response(result)
         elif parsed_path.path == '/api/sms/extract-appt':
             result = self.sms_extract_appt(data)
@@ -1732,6 +2035,144 @@ class WaitlistHandler(BaseHTTPRequestHandler):
 
     # ── SMS Draft+Approve handlers ─────────────────────────────────────────────
 
+    def get_checkout_today(self):
+        """Return today's unchecked-out appointments grouped by client, with card + tip info."""
+        query = """
+SELECT
+    gl.GLSeq,
+    CONVERT(varchar, CAST(gl.GLInTime AS time), 100) AS InTime,
+    p.PtPetName,
+    c.CLSeq AS ClientID,
+    c.CLFirstName + ' ' + c.CLLastName AS ClientName,
+    ISNULL(e1.USFNAME, '') AS Groomer,
+    ISNULL(c.CLCCMask,  '') AS Card1,  ISNULL(c.CLCCAltDesc,  '') AS Card1Desc,
+    ISNULL(c.CLCCMask2, '') AS Card2,  ISNULL(c.CLCCAltDesc2, '') AS Card2Desc,
+    ISNULL(c.CLCCMask3, '') AS Card3,  ISNULL(c.CLCCAltDesc3, '') AS Card3Desc,
+    ISNULL(CAST(s.AvgTipPct    AS varchar), '') AS AvgTipPct,
+    ISNULL(CAST(s.AvgTipAmount AS varchar), '') AS AvgTipAmt,
+    ISNULL(CAST(s.LastTipPct   AS varchar), '') AS LastTipPct,
+    ISNULL(CAST(s.LastTipAmount AS varchar), '') AS LastTipAmt,
+    ISNULL(s.TipMethod,    '') AS TipMethod,
+    ISNULL(s.PreferredDay, '') AS PreferredDay,
+    ISNULL(CAST(s.AvgCadenceDays AS varchar), '') AS AvgCadenceDays,
+    ISNULL((SELECT TOP 1 CONVERT(varchar, gl2.GLDate, 101)
+            FROM GroomingLog gl2
+            INNER JOIN Pets p2 ON gl2.GLPetID = p2.PtSeq
+            WHERE p2.PtOwnerCode = c.CLSeq
+            AND gl2.GLDate > CAST(GETDATE() AS DATE)
+            AND (gl2.GLDeleted IS NULL OR gl2.GLDeleted = 0)
+            AND (gl2.GLWaitlist IS NULL OR gl2.GLWaitlist = 0)
+            AND (gl2.GLNoShow IS NULL OR gl2.GLNoShow = 0)
+            ORDER BY gl2.GLDate), '') AS NextAppt,
+    ISNULL(CAST((SELECT COUNT(*)
+            FROM GroomingLog gl2
+            INNER JOIN Pets p2 ON gl2.GLPetID = p2.PtSeq
+            WHERE p2.PtOwnerCode = c.CLSeq
+            AND gl2.GLDate > CAST(GETDATE() AS DATE)
+            AND (gl2.GLDeleted IS NULL OR gl2.GLDeleted = 0)
+            AND (gl2.GLWaitlist IS NULL OR gl2.GLWaitlist = 0)
+            AND (gl2.GLNoShow IS NULL OR gl2.GLNoShow = 0)) AS varchar), '0') AS FutureApptCount,
+    CASE WHEN EXISTS (
+            SELECT 1 FROM GroomingLog gl2
+            INNER JOIN Pets p2 ON gl2.GLPetID = p2.PtSeq
+            WHERE p2.PtOwnerCode = c.CLSeq
+            AND gl2.GLDate > CAST(GETDATE() AS DATE)
+            AND (gl2.GLDeleted IS NULL OR gl2.GLDeleted = 0)
+            AND (gl2.GLWaitlist IS NULL OR gl2.GLWaitlist = 0)
+            AND (gl2.GLNoShow IS NULL OR gl2.GLNoShow = 0)
+            AND (
+                EXISTS (SELECT 1 FROM Calendar cal
+                        WHERE cal.Date = gl2.GLDate
+                        AND cal.Styleset IN ('HOLIDAY', 'CLOSED'))
+                OR (gl2.GLGroomerID IS NOT NULL AND EXISTS (
+                        SELECT 1 FROM BlockedTime bt
+                        WHERE bt.BTGroomerID = gl2.GLGroomerID
+                        AND bt.BTDate = gl2.GLDate))
+            )
+        ) THEN '1' ELSE '0' END AS HasConflict,
+    ISNULL(CAST(gl.GLCompleted AS varchar), '0') AS Completed
+FROM GroomingLog gl
+INNER JOIN Pets p ON gl.GLPetID = p.PtSeq
+INNER JOIN Clients c ON p.PtOwnerCode = c.CLSeq
+LEFT JOIN Employees e1 ON gl.GLGroomerID = e1.USSEQN
+LEFT JOIN DBFCMClientStats s ON c.CLSeq = s.ClientID
+WHERE gl.GLDate = CAST(GETDATE() AS DATE)
+  AND (gl.GLDeleted IS NULL OR gl.GLDeleted = 0)
+  AND (gl.GLNoShow IS NULL OR gl.GLNoShow = 0)
+  AND p.PtSeq != 12120
+  AND NOT EXISTS (
+      SELECT 1 FROM Receipts r
+      WHERE r.RPCLIENTID = c.CLSeq
+      AND CAST(r.RPDATE AS DATE) = CAST(GETDATE() AS DATE)
+  )
+ORDER BY gl.GLInTime, c.CLSeq
+"""
+        rows = _sql_query(query.strip())
+
+        # Group by ClientID — one card per client, list pets
+        from collections import OrderedDict
+        clients = OrderedDict()
+
+        for row in rows:
+            if len(row) < 18:
+                continue
+            (glseq, in_time, pet_name, client_id, client_name, groomer,
+             card1, card1_desc, card2, card2_desc, card3, card3_desc,
+             avg_tip_pct, avg_tip_amt, last_tip_pct, last_tip_amt,
+             tip_method, preferred_day, avg_cadence_days,
+             next_appt, future_appt_count, has_conflict,
+             completed) = row[:23] if len(row) >= 23 else (row + [''] * 23)[:23]
+
+            if client_id not in clients:
+                # Build cards list (only non-empty masks)
+                cards = []
+                for mask, desc in [(card1, card1_desc), (card2, card2_desc), (card3, card3_desc)]:
+                    if mask and mask not in ('', 'NULL'):
+                        cards.append({
+                            'last4': mask,
+                            'desc': desc if desc and desc not in ('', 'NULL') else None
+                        })
+
+                def _float_or_none(v):
+                    try:
+                        return float(v) if v and v not in ('', 'NULL') else None
+                    except Exception:
+                        return None
+
+                future_count = int(future_appt_count) if future_appt_count and future_appt_count.isdigit() else 0
+                pref_day_val = preferred_day if preferred_day and preferred_day not in ('', 'NULL') else None
+                cadence_val  = _float_or_none(avg_cadence_days)
+                suggested = None
+                if future_count == 0:
+                    suggested = _suggest_next_date(cadence_val, pref_day_val)
+
+                clients[client_id] = {
+                    'client_id':        client_id,
+                    'client_name':      client_name,
+                    'in_time':          in_time,
+                    'pets':             [],
+                    'cards':            cards,
+                    'avg_tip_pct':      _float_or_none(avg_tip_pct),
+                    'avg_tip_amt':      _float_or_none(avg_tip_amt),
+                    'last_tip_pct':     _float_or_none(last_tip_pct),
+                    'last_tip_amt':     _float_or_none(last_tip_amt),
+                    'tip_method':       tip_method if tip_method and tip_method not in ('', 'NULL') else None,
+                    'preferred_day':    pref_day_val,
+                    'avg_cadence_days': cadence_val,
+                    'next_appt':        next_appt if next_appt and next_appt not in ('', 'NULL') else None,
+                    'future_appt_count': future_count,
+                    'has_conflict':     has_conflict == '1',
+                    'suggested_next':   suggested,
+                }
+
+            clients[client_id]['pets'].append({
+                'name':    pet_name,
+                'groomer': groomer if groomer else None,
+                'done':    completed == '-1',
+            })
+
+        return {'clients': list(clients.values()), 'count': len(clients)}
+
     def sms_get_drafts(self):
         """Return list of pending SMS drafts sorted oldest first."""
         with _sms_drafts_lock:
@@ -1760,6 +2201,16 @@ class WaitlistHandler(BaseHTTPRequestHandler):
             _sms_attribute_to_claude(new_msg_id)
 
         if draft_id:
+            # Track escalation before removing from drafts
+            with _sms_drafts_lock:
+                draft_info = dict(_sms_drafts.get(draft_id, {}))
+            if draft_info.get('is_escalation'):
+                _sent_escalations[draft_id] = {
+                    'escalation_context': draft_info.get('escalation_context', ''),
+                    'sent_at':            datetime.now().isoformat(),
+                    'matched':            False,
+                }
+                _save_pending_escalations()
             try:
                 _sms_mark_handled(int(draft_id))
             except (ValueError, TypeError):
@@ -1779,6 +2230,16 @@ class WaitlistHandler(BaseHTTPRequestHandler):
             _sms_attribute_to_claude(kcapp_msg_id)
 
         if draft_id:
+            # Track escalation before removing from drafts
+            with _sms_drafts_lock:
+                draft_info = dict(_sms_drafts.get(draft_id, {}))
+            if draft_info.get('is_escalation'):
+                _sent_escalations[draft_id] = {
+                    'escalation_context': draft_info.get('escalation_context', ''),
+                    'sent_at':            datetime.now().isoformat(),
+                    'matched':            False,
+                }
+                _save_pending_escalations()
             try:
                 _sms_mark_handled(int(draft_id))
             except (ValueError, TypeError):
@@ -1790,6 +2251,87 @@ class WaitlistHandler(BaseHTTPRequestHandler):
         log.info(f"[SMS] post-send: attributed msg {kcapp_msg_id} to Claude, draft {draft_id} resolved")
         return {'success': True, 'message_id': kcapp_msg_id}
 
+    def sms_compose(self, data):
+        """Natural-language SMS compose: parse instruction → look up client → draft → queue."""
+        instruction = data.get('instruction', '').strip()
+        if not instruction:
+            return {'success': False, 'error': 'instruction required'}
+
+        system = (
+            "You are composing SMS messages for Dog's Best Friend grooming salon (Noah, owner). "
+            "Given a natural language instruction, return ONLY valid JSON with exactly two keys: "
+            '{"client": "FirstName LastName  OR  pet:PetName", "draft": "the SMS text"} '
+            "SMS voice: start with Hi [FirstName], concise, no emojis, no exclamation marks, use we/us. "
+            "Return ONLY the JSON object — no explanation, no markdown."
+        )
+        raw = _run_one_shot_claude(system, instruction, timeout=30)
+        if not raw:
+            return {'success': False, 'error': 'Claude did not respond'}
+
+        import re as _re
+        try:
+            parsed = json.loads(raw.strip())
+        except Exception:
+            m = _re.search(r'\{[^{}]+\}', raw, _re.DOTALL)
+            if m:
+                try:
+                    parsed = json.loads(m.group())
+                except Exception:
+                    return {'success': False, 'error': f'Could not parse Claude response: {raw[:120]}'}
+            else:
+                return {'success': False, 'error': f'Could not parse Claude response: {raw[:120]}'}
+
+        client_query = parsed.get('client', '').strip()
+        draft = parsed.get('draft', '').strip()
+        if not client_query or not draft:
+            return {'success': False, 'error': 'Claude returned incomplete data'}
+
+        client = _sms_lookup_client(client_query)
+        if not client:
+            return {'success': False, 'error': f'Client not found: {client_query}'}
+
+        draft_id = f"compose-{uuid.uuid4().hex[:8]}"
+        with _sms_drafts_lock:
+            _sms_drafts[draft_id] = {
+                'draft_id':            draft_id,
+                'message_id':          0,
+                'client_id':           client['client_id'],
+                'client_name':         client['client_name'],
+                'phone':               client['phone'],
+                'their_message':       '',
+                'recent_conversation': [],
+                'draft':               draft,
+                'timestamp':           datetime.now().strftime('%Y-%m-%dT%H:%M'),
+            }
+        _save_sms_drafts()
+        log.info(f"[SMS] Composed outbound for {client['client_name']}: {draft[:60]}")
+        return {'success': True, 'draft_id': draft_id,
+                'client_name': client['client_name'], 'draft': draft}
+
+    def sms_queue_outbound(self, data):
+        """Manually queue an outbound SMS as a draft for review+send via the extension."""
+        client_id   = int(data.get('client_id', 0))
+        client_name = data.get('client_name', '').strip()
+        phone       = data.get('phone', '').strip()
+        message     = data.get('message', '').strip()
+        if not phone or not message:
+            return {'success': False, 'error': 'phone and message required'}
+        draft_id = f"manual-{uuid.uuid4().hex[:8]}"
+        with _sms_drafts_lock:
+            _sms_drafts[draft_id] = {
+                'draft_id':      draft_id,
+                'message_id':    0,
+                'client_id':     client_id,
+                'client_name':   client_name,
+                'phone':         phone,
+                'their_message': '',   # outbound-only, no inbound thread
+                'draft':         message,
+                'timestamp':     datetime.now().strftime('%Y-%m-%dT%H:%M'),
+            }
+        _save_sms_drafts()
+        log.info(f"[SMS] Queued outbound draft {draft_id} for {client_name}")
+        return {'success': True, 'draft_id': draft_id}
+
     def sms_dismiss_draft(self, data):
         """Remove a draft without sending (user chose to skip)."""
         draft_id = str(data.get('draft_id', ''))
@@ -1800,6 +2342,90 @@ class WaitlistHandler(BaseHTTPRequestHandler):
         if removed is not None:
             _save_sms_drafts()
         return {'success': True, 'removed': removed is not None}
+
+    def sms_regen_draft(self, data):
+        """Regenerate a draft reply using user feedback."""
+        draft_id = str(data.get('draft_id', ''))
+        feedback = data.get('feedback', '').strip()
+        if not draft_id:
+            return {'success': False, 'error': 'draft_id required'}
+        if not feedback:
+            return {'success': False, 'error': 'feedback required'}
+
+        with _sms_drafts_lock:
+            draft_info = dict(_sms_drafts.get(draft_id, {}))
+        if not draft_info:
+            return {'success': False, 'error': 'Draft not found'}
+
+        client_id     = draft_info.get('client_id')
+        their_message = draft_info.get('their_message', '')
+        original_draft = draft_info.get('draft', '')
+
+        ctx = _sms_get_client_context(client_id) if client_id else None
+        if not ctx:
+            return {'success': False, 'error': 'Could not load client context'}
+
+        log.info(f"[SMS] Regen draft {draft_id} with feedback: {feedback[:60]}")
+        new_draft = _sms_regen_with_feedback(ctx, their_message, original_draft, feedback)
+        if not new_draft:
+            return {'success': False, 'error': 'Claude did not return a revised draft'}
+
+        with _sms_drafts_lock:
+            if draft_id in _sms_drafts:
+                _sms_drafts[draft_id]['draft'] = new_draft
+        _save_sms_drafts()
+        return {'success': True, 'draft': new_draft}
+
+    def sms_draft_from_knowabot(self, data):
+        """Queue an SMS draft from Know-a-bot — escalation to Noah or message to a client."""
+        recipient = data.get('recipient', '').strip()
+        message   = data.get('message', '').strip()
+        context   = data.get('context', '').strip()
+
+        if not recipient or not message:
+            return {'success': False, 'error': 'recipient and message are required'}
+
+        if recipient.lower() == 'noah':
+            # Escalation draft to Noah's personal cell
+            draft_id = f"escalation-{uuid.uuid4().hex[:8]}"
+            with _sms_drafts_lock:
+                _sms_drafts[draft_id] = {
+                    'draft_id':           draft_id,
+                    'message_id':         0,
+                    'client_id':          None,
+                    'client_name':        'Noah (owner)',
+                    'phone':              NOAH_CELL_PRIMARY,
+                    'their_message':      '',
+                    'recent_conversation': [],
+                    'draft':              message,
+                    'timestamp':          datetime.now().strftime('%Y-%m-%dT%H:%M'),
+                    'is_escalation':      True,
+                    'escalation_context': context,
+                }
+            _save_sms_drafts()
+            log.info(f"[SMS] Know-a-bot escalation queued (draft_id={draft_id}): {message[:60]}")
+            return {'success': True, 'draft_id': draft_id}
+        else:
+            # Client SMS draft
+            client = _sms_lookup_client(recipient)
+            if not client:
+                return {'success': False, 'error': f'Client not found: {recipient}'}
+            draft_id = f"knowabot-{uuid.uuid4().hex[:8]}"
+            with _sms_drafts_lock:
+                _sms_drafts[draft_id] = {
+                    'draft_id':           draft_id,
+                    'message_id':         0,
+                    'client_id':          client['client_id'],
+                    'client_name':        client['client_name'],
+                    'phone':              client['phone'],
+                    'their_message':      '',
+                    'recent_conversation': [],
+                    'draft':              message,
+                    'timestamp':          datetime.now().strftime('%Y-%m-%dT%H:%M'),
+                }
+            _save_sms_drafts()
+            log.info(f"[SMS] Know-a-bot draft for {client['client_name']} (draft_id={draft_id}): {message[:60]}")
+            return {'success': True, 'draft_id': draft_id}
 
     def sms_extract_appt(self, data):
         """Use Claude to extract appointment details from an SMS thread for booking pre-fill."""
@@ -2016,6 +2642,9 @@ def run_server(port=8000):
 
     # Restore any SMS drafts that were pending before last restart
     _load_sms_drafts()
+
+    # Restore pending escalations (to match Noah replies to original questions)
+    _load_pending_escalations()
 
     # Generate MCP config JSON pointing to scripts in this extension folder
     _generate_mcp_config()

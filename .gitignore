@@ -6,7 +6,9 @@ conflict_cache.json
 sms_drafts.json
 
 # Per-machine settings (contains credentials — never commit)
+# config.<HOSTNAME>.json allows multiple machines to coexist in the same OneDrive folder
 config.local.json
+config.DESKTOP-*.json
 
 # Python bytecode
 __pycache__/
@@ -21,7 +23,6 @@ __pycache__/
 
 # Local environment / credentials (for future use)
 .env
-config.local.json
 
 # macOS
 .DS_Store
