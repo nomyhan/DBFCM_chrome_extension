@@ -2487,6 +2487,7 @@ LEFT JOIN DBFCMClientStats s ON c.CLSeq = s.ClientID
 WHERE gl.GLDate = CAST(GETDATE() AS DATE)
   AND (gl.GLDeleted IS NULL OR gl.GLDeleted = 0)
   AND (gl.GLNoShow IS NULL OR gl.GLNoShow = 0)
+  AND (gl.GLWaitlist IS NULL OR gl.GLWaitlist = 0)
   AND p.PtSeq != 12120
   AND NOT EXISTS (
       SELECT 1 FROM Receipts r
