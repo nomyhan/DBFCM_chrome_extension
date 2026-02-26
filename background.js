@@ -38,7 +38,12 @@ function showPrintReminder() {
 
 function openReminderWindow(nextDay = 'tomorrow') {
     const url = chrome.runtime.getURL(`reminder.html?nextDay=${nextDay}`);
-    chrome.windows.create({ url, type: 'popup', width: 360, height: 220, focused: true });
+    const W = 360, H = 300;
+    chrome.windows.getLastFocused({ populate: false }, (win) => {
+        const left = win ? Math.round(win.left + (win.width  - W) / 2) : 200;
+        const top  = win ? Math.round(win.top  + (win.height - H) / 2) : 200;
+        chrome.windows.create({ url, type: 'popup', width: W, height: H, left, top, focused: true });
+    });
 }
 
 // Update badge with waitlist count
