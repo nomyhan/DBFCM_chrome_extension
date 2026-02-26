@@ -10,6 +10,7 @@
     "tabs",
     "windows",
     "alarms",
+    "notifications",
     "cookies"
   ],
   "host_permissions": [
