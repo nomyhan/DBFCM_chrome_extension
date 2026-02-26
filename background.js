@@ -82,8 +82,3 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     }
 });
 
-chrome.runtime.onMessage.addListener((msg) => {
-    if (msg.type === 'testPrintReminder') {
-        showPrintReminder(true);
-    }
-});
