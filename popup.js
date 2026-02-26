@@ -75,13 +75,24 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('restart-backend-btn').addEventListener('click', restartBackend);
     document.getElementById('reload-extension-btn').addEventListener('click', () => chrome.runtime.reload());
     document.getElementById('test-reminder-btn').addEventListener('click', () => {
-        chrome.notifications.create('printReminderTest', {
-            type: 'basic',
-            iconUrl: 'icons/icon128.png',
-            title: '📋 Print Appointment Cards',
-            message: "Time to print tomorrow's appointment cards!",
-            priority: 1,
-        });
+        showPrintReminderDialog('tomorrow');
+    });
+
+    document.getElementById('reminder-dismiss-btn').addEventListener('click', () => {
+        document.getElementById('print-reminder-dialog').classList.add('hidden');
+        chrome.storage.local.remove('printReminderPending');
+    });
+
+    // Show dialog if a reminder was queued while the panel was closed
+    chrome.storage.local.get('printReminderPending', (res) => {
+        if (res.printReminderPending) showPrintReminderDialog(res.printReminderPending);
+    });
+
+    // React in real-time if the panel is already open when the alarm fires
+    chrome.storage.onChanged.addListener((changes, area) => {
+        if (area === 'local' && changes.printReminderPending?.newValue) {
+            showPrintReminderDialog(changes.printReminderPending.newValue);
+        }
     });
 
     // Tab switching
@@ -954,6 +965,15 @@ function openCalendarOnDate(dateStr) {
             });
         }
     });
+}
+
+// Show the print-cards reminder dialog
+function showPrintReminderDialog(nextDay = 'tomorrow') {
+    const msg = nextDay === 'Tuesday'
+        ? "Next business day is Tuesday — print those appointment cards!"
+        : "Print tomorrow's appointment cards before you forget!";
+    document.getElementById('reminder-message').textContent = msg;
+    document.getElementById('print-reminder-dialog').classList.remove('hidden');
 }
 
 // Show loading state

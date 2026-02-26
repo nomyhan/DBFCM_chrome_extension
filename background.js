@@ -27,19 +27,15 @@ function schedulePrintReminder() {
     });
 }
 
-function showPrintReminder(force = false) {
-    // Only fire on business days (Tue=2 through Sat=6) unless forced for testing
+function showPrintReminder() {
+    // Only fire on business days (Tue=2 through Sat=6)
     const day = new Date().getDay(); // 0=Sun, 1=Mon, ..., 6=Sat
-    if (!force && (day === 0 || day === 1)) return;
+    if (day === 0 || day === 1) return;
 
     const nextDay = day === 6 ? 'Tuesday' : 'tomorrow';
-    chrome.notifications.create(PRINT_REMINDER_ALARM, {
-        type: 'basic',
-        iconUrl: 'icons/icon128.png',
-        title: '📋 Print Appointment Cards',
-        message: `Time to print ${nextDay}'s appointment cards!`,
-        priority: 1,
-    });
+    // Signal the side panel via storage; popup reacts immediately if open,
+    // or picks it up on next open.
+    chrome.storage.local.set({ printReminderPending: nextDay });
 }
 
 // Update badge with waitlist count
