@@ -584,7 +584,9 @@ def _sms_get_client_context(client_id):
     pet_rows = _sql_query(
         f"SELECT p.PtPetName, ISNULL(b.BrBreed,'') "
         f"FROM Pets p LEFT JOIN Breeds b ON p.PtBreedID=b.BrSeq "
-        f"WHERE p.PtOwnerCode={cid} AND (p.PtDeleted IS NULL OR p.PtDeleted=0)")
+        f"WHERE p.PtOwnerCode={cid} AND (p.PtDeleted IS NULL OR p.PtDeleted=0) "
+        f"AND (p.PtInactive IS NULL OR p.PtInactive=0) "
+        f"AND (p.PtDeceased IS NULL OR p.PtDeceased=0)")
     pets = [f"{r[0]} ({r[1]})" if len(r) > 1 and r[1] else r[0] for r in pet_rows]
 
     appt_rows = _sql_query(
@@ -737,6 +739,8 @@ FROM Pets p
 LEFT JOIN Breeds b ON p.PtBreedID=b.BrSeq
 WHERE p.PtOwnerCode={cid}
 AND (p.PtDeleted IS NULL OR p.PtDeleted=0)
+AND (p.PtInactive IS NULL OR p.PtInactive=0)
+AND (p.PtDeceased IS NULL OR p.PtDeceased=0)
 ORDER BY p.PtPetName
 """)
     pet_ids  = []
@@ -2868,7 +2872,8 @@ ORDER BY gl.GLInTime, c.CLSeq
         # Client's pets for matching
         pet_rows = _sql_query(
             f"SELECT PtSeq, PtPetName FROM Pets "
-            f"WHERE PtOwnerCode={client_id} AND (PtDeleted IS NULL OR PtDeleted=0)")
+            f"WHERE PtOwnerCode={client_id} AND (PtDeleted IS NULL OR PtDeleted=0) "
+            f"AND (PtInactive IS NULL OR PtInactive=0) AND (PtDeceased IS NULL OR PtDeceased=0)")
         pets = [{'id': int(r[0]), 'name': r[1]} for r in pet_rows if len(r) >= 2]
         pets_list = ', '.join(p['name'] for p in pets) or 'unknown'
 
