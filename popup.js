@@ -74,6 +74,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     document.getElementById('restart-backend-btn').addEventListener('click', restartBackend);
     document.getElementById('reload-extension-btn').addEventListener('click', () => chrome.runtime.reload());
+    document.getElementById('test-reminder-btn').addEventListener('click', () => {
+        chrome.runtime.sendMessage({ type: 'testPrintReminder' });
+    });
 
     // Tab switching
     document.querySelectorAll('.tab-btn').forEach(btn => {

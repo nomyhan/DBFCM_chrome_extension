@@ -27,10 +27,10 @@ function schedulePrintReminder() {
     });
 }
 
-function showPrintReminder() {
-    // Only fire on business days (Tue=2 through Sat=6)
+function showPrintReminder(force = false) {
+    // Only fire on business days (Tue=2 through Sat=6) unless forced for testing
     const day = new Date().getDay(); // 0=Sun, 1=Mon, ..., 6=Sat
-    if (day === 0 || day === 1) return;
+    if (!force && (day === 0 || day === 1)) return;
 
     const nextDay = day === 6 ? 'Tuesday' : 'tomorrow';
     chrome.notifications.create(PRINT_REMINDER_ALARM, {
@@ -79,5 +79,11 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     }
     if (alarm.name === PRINT_REMINDER_ALARM) {
         showPrintReminder();
+    }
+});
+
+chrome.runtime.onMessage.addListener((msg) => {
+    if (msg.type === 'testPrintReminder') {
+        showPrintReminder(true);
     }
 });
