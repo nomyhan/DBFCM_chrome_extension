@@ -33,9 +33,12 @@ function showPrintReminder() {
     if (day === 0 || day === 1) return;
 
     const nextDay = day === 6 ? 'Tuesday' : 'tomorrow';
-    // Signal the side panel via storage; popup reacts immediately if open,
-    // or picks it up on next open.
-    chrome.storage.local.set({ printReminderPending: nextDay });
+    openReminderWindow(nextDay);
+}
+
+function openReminderWindow(nextDay = 'tomorrow') {
+    const url = chrome.runtime.getURL(`reminder.html?nextDay=${nextDay}`);
+    chrome.windows.create({ url, type: 'popup', width: 360, height: 220, focused: true });
 }
 
 // Update badge with waitlist count
