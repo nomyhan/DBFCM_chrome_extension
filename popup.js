@@ -6,7 +6,7 @@ const DEFAULT_CONFIG = {
 
 // DOM elements
 let settingsPanel, backendUrlInput, liveAccessUrlInput;
-let waitlistContent, availabilityContent, conflictsContent, conflictsModal, conflictCacheStatus, waitlistCountSpan, lastUpdatedSpan;
+let waitlistContent, availabilityContent, conflictsContent, conflictsModal, conflictCacheStatus, waitlistCountSpan, lastUpdatedSpan, wlSortToggleBtn;
 let refreshBtn, settingsBtn, saveSettingsBtn, cancelSettingsBtn, backendStatusBtn;
 let groomerSelect, include230Checkbox;
 let chatMessages, chatInput, chatSendBtn, chatResetBtn;
@@ -21,6 +21,9 @@ let currentTab = 'waitlist';
 let availabilityAllDays = [];
 let availabilityShownCount = 0;
 const AVAIL_PAGE_SIZE = 15;
+
+// Cached waitlist data for re-render on sort toggle
+let _lastWaitlistData = null;
 
 // Initialize
 document.addEventListener('DOMContentLoaded', async () => {
@@ -46,6 +49,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     chatInput = document.getElementById('chat-input');
     chatSendBtn = document.getElementById('chat-send-btn');
     chatResetBtn = document.getElementById('chat-reset-btn');
+    wlSortToggleBtn = document.getElementById('wl-sort-toggle');
+
+    // Waitlist sort toggle
+    wlSortToggleBtn.addEventListener('click', () => {
+        const isFlat = localStorage.getItem('wl-sort-flat') === 'true';
+        localStorage.setItem('wl-sort-flat', !isFlat);
+        if (_lastWaitlistData) displayWaitlist(_lastWaitlistData);
+    });
 
     // Load saved configuration
     await loadConfig();
@@ -432,6 +443,7 @@ async function loadWaitlist() {
         }
 
         const data = await response.json();
+        _lastWaitlistData = data;
         displayWaitlist(data);
 
     } catch (error) {
@@ -440,9 +452,9 @@ async function loadWaitlist() {
     }
 }
 
-// Returns the dominant groomer key if one groomer has ≥60% of visits (min 3 visits)
+// Returns the dominant groomer key if one groomer has ≥60% of recorded visits
 function getDominantGroomer(statsStr, totalVisits) {
-    if (!statsStr || !totalVisits || totalVisits < 3) return null;
+    if (!statsStr || !totalVisits) return null;
     const stats = parseGroomerStats(statsStr, totalVisits);
     if (!stats.length) return null;
     stats.sort((a, b) => b.count - a.count);
@@ -669,33 +681,42 @@ function displayWaitlist(data) {
         `;
     };
 
-    const groupOrder = [
-        { key: 'kumi',     label: '✂️ Kumi',        bg: '#fffbeb', border: '#d97706' },
-        { key: 'tomoko',   label: '✂️ Tomoko',      bg: '#eff6ff', border: '#2563eb' },
-        { key: 'mandilyn', label: '✂️ Mandilyn',    bg: '#f5f3ff', border: '#7c3aed' },
-        { key: 'flexible', label: '↔ Any Groomer', bg: '#f8f9fa', border: '#9ca3af' },
-    ];
+    const isFlatSort = localStorage.getItem('wl-sort-flat') === 'true';
+    wlSortToggleBtn.textContent = isFlatSort ? '⊞ Group by Groomer' : '⋮⋮ By Entry';
 
     let html = '';
-    groupOrder.forEach(({ key, label, bg, border }) => {
-        const items = groups[key];
-        if (!items.length) return;
-        const isCollapsed = localStorage.getItem(`wl-group-${key}`) === 'true';
-        html += `
-            <div class="groomer-group${isCollapsed ? ' collapsed' : ''}">
-                <div class="groomer-group-header" style="background:${bg};border-left:4px solid ${border};">
-                    <label class="group-collapse-label" title="${isCollapsed ? 'Show' : 'Hide'} group">
-                        <input type="checkbox" class="group-toggle" data-group="${key}" ${isCollapsed ? '' : 'checked'}>
-                    </label>
-                    <span class="groomer-group-name">${label}</span>
-                    <span class="groomer-group-count">${items.length} dog${items.length !== 1 ? 's' : ''}</span>
+
+    if (isFlatSort) {
+        const sorted = [...data.waitlist].sort((a, b) => parseInt(a.glseq) - parseInt(b.glseq));
+        html = `<div>${sorted.map(buildItemHtml).join('')}</div>`;
+    } else {
+        const groupOrder = [
+            { key: 'kumi',     label: '✂️ Kumi',        bg: '#fffbeb', border: '#d97706' },
+            { key: 'tomoko',   label: '✂️ Tomoko',      bg: '#eff6ff', border: '#2563eb' },
+            { key: 'mandilyn', label: '✂️ Mandilyn',    bg: '#f5f3ff', border: '#7c3aed' },
+            { key: 'flexible', label: '↔ Any Groomer', bg: '#f8f9fa', border: '#9ca3af' },
+        ];
+
+        groupOrder.forEach(({ key, label, bg, border }) => {
+            const items = groups[key];
+            if (!items.length) return;
+            const isCollapsed = localStorage.getItem(`wl-group-${key}`) === 'true';
+            html += `
+                <div class="groomer-group${isCollapsed ? ' collapsed' : ''}">
+                    <div class="groomer-group-header" style="background:${bg};border-left:4px solid ${border};">
+                        <label class="group-collapse-label" title="${isCollapsed ? 'Show' : 'Hide'} group">
+                            <input type="checkbox" class="group-toggle" data-group="${key}" ${isCollapsed ? '' : 'checked'}>
+                        </label>
+                        <span class="groomer-group-name">${label}</span>
+                        <span class="groomer-group-count">${items.length} dog${items.length !== 1 ? 's' : ''}</span>
+                    </div>
+                    <div class="groomer-group-body">
+                        ${items.map(buildItemHtml).join('')}
+                    </div>
                 </div>
-                <div class="groomer-group-body">
-                    ${items.map(buildItemHtml).join('')}
-                </div>
-            </div>
-        `;
-    });
+            `;
+        });
+    }
 
     waitlistContent.innerHTML = html;
 
