@@ -1251,6 +1251,29 @@ body {
 
 /* ===== Noah-bot Chat Tab ===== */
 
+.chat-operator-bar {
+    display: flex;
+    align-items: center;
+    padding: 4px 12px;
+    background: #f7f7f7;
+    border-bottom: 1px solid #e0e0e0;
+    flex-shrink: 0;
+    font-size: 11px;
+    color: #666;
+}
+
+.chat-operator-bar.operator-noah {
+    background: #eef3ff;
+    color: #3a4db7;
+    border-bottom-color: #c8d4f5;
+}
+
+.chat-operator-bar.operator-unknown {
+    background: #fff8e1;
+    color: #8a6a00;
+    border-bottom-color: #f0d87a;
+}
+
 .chat-input-bar {
     display: flex;
     gap: 6px;
@@ -1536,6 +1559,67 @@ body {
     margin-bottom: 12px;
     background: #fff;
 }
+/* ── SMS card dossier strip ──────────────────────────────────────────────── */
+.sms-dossier {
+    padding: 5px 12px 7px;
+    background: #f7f8fa;
+    border-bottom: 1px solid #e8e8e8;
+    font-size: 11px;
+    line-height: 1.55;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.sms-dossier-new {
+    display: inline-block;
+    background: #dcfce7;
+    color: #15803d;
+    border: 1px solid #86efac;
+    border-radius: 3px;
+    padding: 1px 7px;
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    align-self: flex-start;
+    margin-bottom: 2px;
+}
+
+.sms-dossier-warning {
+    color: #b45309;
+    background: #fffbeb;
+    border: 1px solid #fde68a;
+    border-radius: 3px;
+    padding: 2px 6px;
+    font-size: 10.5px;
+}
+
+.sms-dossier-pet {
+    color: #333;
+    font-weight: 500;
+}
+
+.sms-dossier-breed {
+    color: #666;
+    font-weight: 400;
+}
+
+.sms-dossier-overdue {
+    color: #b45309;
+    font-weight: 700;
+}
+
+.sms-dossier-booking {
+    color: #1d4ed8;
+    font-size: 10.5px;
+}
+
+.sms-dossier-cadence {
+    color: #666;
+    font-size: 10.5px;
+}
+
+/* ── SMS card header ─────────────────────────────────────────────────────── */
 .sms-card-header {
     display: flex;
     justify-content: space-between;

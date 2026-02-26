@@ -192,7 +192,19 @@ def build_noahbot_system_prompt():
         "The message must: (1) describe in plain language exactly what you are about to do, "
         "(2) explain the real-world consequence in simple terms (e.g. 'This will add a real appointment "
         "to the live system that the client and groomers will see'), and (3) ask the user to confirm "
-        "before you proceed. Do not call the tool until you receive explicit confirmation.\n\n---\n\n"
+        "before you proceed. Do not call the tool until you receive explicit confirmation.\n\n"
+        "OPERATOR CONTEXT: Each message you receive will start with a line like [Operator: Name]. "
+        "This tells you who is currently using Know-a-bot. Noah is the owner and has full access. "
+        "Staff members (Tomoko, Kumi, Mandilyn, Elmer, Josh) can also make changes. "
+        "Unknown means the KCApp login could not be read — this is a detection issue, not a ban.\n\n"
+        "AUTHORIZATION RULES:\n"
+        "- Noah: full access. No extra confirmation beyond the standard confirmation rule.\n"
+        "- Named staff (Tomoko, Kumi, Mandilyn, Elmer, Josh): full access to read and write. "
+        "Follow the standard CONFIRMATION RULE before any write tool.\n"
+        "- Unknown operator: proceed normally for read queries. For write operations, add one extra "
+        "sentence in your confirmation: 'Note: I could not detect your KCApp login — please make sure "
+        "you are logged in, or let me know your name.' Then proceed if they confirm. "
+        "Do NOT refuse or hard-block — Unknown just means the login detection did not work.\n\n---\n\n"
     )
 
     for filename in doc_files:
@@ -360,6 +372,10 @@ SQL_DATABASE = _cfg['sql_database']
 _sms_drafts = {}
 _sms_drafts_lock = threading.Lock()
 _sms_last_seen_id = 0   # watermark: last inbound MessageId processed
+
+# Dossier cache: client_id -> (dossier_dict, expires_at_unix)
+# Populated lazily when GET /api/sms/drafts is called; TTL 60s.
+_dossier_cache = {}
 _SMS_DRAFTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'sms_drafts.json')
 
 # ── Noah's personal cell numbers (for inbound routing) ───────────────────────
@@ -448,10 +464,15 @@ def _sql_query(query):
     cmd = ['sqlcmd', '-S', SQL_SERVER, '-d', SQL_DATABASE, *SQL_AUTH_ARGS,
            '-Q', f'SET NOCOUNT ON; {query}', '-W', '-h', '-1', '-s', '\t']
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        # Use utf-8 with errors='replace' so special characters (e.g. accented
+        # letters in client/pet names) don't crash with cp1252 UnicodeDecodeError.
+        result = subprocess.run(cmd, capture_output=True,
+                                encoding='utf-8', errors='replace', timeout=30)
     except Exception:
         return []
     if result.returncode != 0:
+        return []
+    if not result.stdout:
         return []
     rows = []
     for line in result.stdout.strip().split('\n'):
@@ -606,6 +627,318 @@ def _sms_get_client_context(client_id):
         'recent_conversation':   recent,
     }
 
+
+def _sms_get_client_dossier(client_id):
+    """Rich client snapshot for the SMS card. Cached 60 seconds.
+
+    Returned dict shape:
+      pets          — list of {name, breed_code, last_groom, weeks_since, service, groomer}
+      last_visit    — "Feb 1 (25d ago)" or None
+      next_appt     — "Mar 15 — Fido w/ Tomoko" or None
+      warning       — CLWarning string or None
+      is_new_client — bool (< 3 lifetime appointments)
+      future_count  — int
+      preferred_day — "Saturday" or None
+      preferred_time— "10:00 AM" or None
+      avg_cadence_days — float or None
+      suggested_next— "Apr 7 (Sat, ~6 wks)" or None   (only when future_count == 0)
+    """
+    import time as _time
+    from datetime import date as _date, timedelta as _timedelta
+    from collections import Counter
+
+    cid = int(client_id)
+    now = _time.time()
+    if cid in _dossier_cache:
+        cached_data, exp = _dossier_cache[cid]
+        if now < exp:
+            return cached_data
+
+    MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+
+    def friendly(date_str):
+        try:
+            y, m, d = date_str.split('-')
+            return f"{MON[int(m)-1]} {int(d)}"
+        except Exception:
+            return date_str
+
+    result = {
+        'pets':             [],
+        'last_visit':       None,
+        'next_appt':        None,
+        'warning':          None,
+        'is_new_client':    False,
+        'future_count':     0,
+        'preferred_day':    None,
+        'preferred_time':   None,
+        'avg_cadence_days': None,
+        'suggested_next':   None,
+    }
+
+    # ── Query 1: client stats + future appt count ─────────────────────────
+    hdr = _sql_query(f"""
+SELECT
+    ISNULL(c.CLWarning,''),
+    ISNULL(CAST(s.AvgCadenceDays AS varchar),''),
+    ISNULL(s.PreferredDay,''),
+    ISNULL(s.PreferredTime,''),
+    ISNULL(CAST(s.ApptCount12Mo AS varchar),''),
+    CAST((SELECT COUNT(*)
+          FROM GroomingLog gl2
+          INNER JOIN Pets p2 ON gl2.GLPetID=p2.PtSeq
+          WHERE p2.PtOwnerCode=c.CLSeq
+          AND gl2.GLDate > CAST(GETDATE() AS DATE)
+          AND (gl2.GLDeleted IS NULL OR gl2.GLDeleted=0)
+          AND (gl2.GLWaitlist IS NULL OR gl2.GLWaitlist=0)
+          AND (gl2.GLNoShow IS NULL OR gl2.GLNoShow=0)) AS varchar)
+FROM Clients c
+LEFT JOIN DBFCMClientStats s ON c.CLSeq=s.ClientID
+WHERE c.CLSeq={cid}
+""")
+    if hdr and hdr[0] and len(hdr[0]) >= 6:
+        r = hdr[0]
+        result['warning']          = r[0].strip() or None
+        cadence_s                  = r[1].strip()
+        result['preferred_day']    = r[2].strip() or None
+        result['preferred_time']   = r[3].strip() or None
+        appt_12mo_s                = r[4].strip()
+        future_s                   = r[5].strip()
+        try:
+            result['avg_cadence_days'] = float(cadence_s) if cadence_s else None
+        except ValueError:
+            pass
+        try:
+            result['future_count'] = int(future_s) if future_s else 0
+        except ValueError:
+            pass
+        # is_new_client: no stats row yet or zero appointments in last 12 months
+        try:
+            result['is_new_client'] = (not appt_12mo_s or int(appt_12mo_s) == 0)
+        except ValueError:
+            result['is_new_client'] = True
+
+    # ── Query 2: pets + per-pet last groom date + birthdate ──────────────
+    pet_rows = _sql_query(f"""
+SELECT
+    CAST(p.PtSeq AS varchar),
+    p.PtPetName,
+    ISNULL(b.BrBreed,''),
+    ISNULL(CONVERT(VARCHAR(10),
+        (SELECT TOP 1 gl.GLDate
+         FROM GroomingLog gl
+         WHERE gl.GLPetID=p.PtSeq
+         AND gl.GLDate < CAST(GETDATE() AS DATE)
+         AND (gl.GLDeleted IS NULL OR gl.GLDeleted=0)
+         AND (gl.GLWaitlist IS NULL OR gl.GLWaitlist=0)
+         ORDER BY gl.GLDate DESC), 120), ''),
+    ISNULL(CONVERT(VARCHAR(10), p.PtBirthdate, 120), '')
+FROM Pets p
+LEFT JOIN Breeds b ON p.PtBreedID=b.BrSeq
+WHERE p.PtOwnerCode={cid}
+AND (p.PtDeleted IS NULL OR p.PtDeleted=0)
+ORDER BY p.PtPetName
+""")
+    pet_ids  = []
+    pet_data = {}
+    for r in pet_rows:
+        if len(r) < 5:
+            continue
+        pid        = r[0].strip()
+        pname      = r[1].strip()
+        breed      = r[2].strip()
+        last_groom = r[3].strip()
+        birthdate  = r[4].strip()
+        if not pname:
+            continue
+
+        # Split "Golden Retriever (LGLH)" → breed_name="Golden Retriever", code="LGLH"
+        if '(' in breed and ')' in breed:
+            breed_name = breed[:breed.rfind('(')].strip()
+            code       = breed[breed.rfind('(')+1:breed.rfind(')')]
+        else:
+            breed_name = breed
+            code       = ''
+
+        # Parse size and hair coat from code: "LGLH" → size="LG", coat="LH"
+        size, coat = '', ''
+        if len(code) >= 4:
+            size = code[:2] if code[:2] in ('XS','SM','MD','LG','XL') else code[:2]
+            coat = code[2:4] if code[2:4] in ('SH','LH') else code[2:4]
+        elif len(code) == 2:
+            coat = code  # e.g. just "SH" or "LH"
+
+        # Compute age from birthdate
+        age_str = ''
+        if birthdate and birthdate not in ('NULL', ''):
+            try:
+                bdate = _date.fromisoformat(birthdate)
+                days  = (_date.today() - bdate).days
+                if days >= 365:
+                    yrs = days // 365
+                    age_str = f"{yrs}y"
+                elif days >= 30:
+                    mos = days // 30
+                    age_str = f"{mos}mo"
+            except Exception:
+                pass
+
+        pet_ids.append(pid)
+        pet_data[pid] = {
+            'name':       pname,
+            'breed_name': breed_name,
+            'size':       size,
+            'coat':       coat,
+            'age':        age_str,
+            'last_groom': last_groom,
+            'service':    None,
+            'groomer':    None,
+        }
+
+    # ── Query 3: appointment history → service type + groomer preference ───
+    total_appts = 0
+    if pet_ids:
+        pid_list = ','.join(pid for pid in pet_ids)
+        hist = _sql_query(f"""
+SELECT TOP 40
+    CAST(gl.GLPetID AS varchar),
+    ISNULL(CAST(gl.GLBath AS varchar),'0'),
+    ISNULL(CAST(gl.GLGroom AS varchar),'0'),
+    ISNULL(CAST(gl.GLOthersID AS varchar),'0'),
+    ISNULL(CAST(gl.GLNailsID AS varchar),'0'),
+    ISNULL(e.USFNAME,'')
+FROM GroomingLog gl
+LEFT JOIN Employees e ON gl.GLGroomerID=e.USSEQN
+WHERE gl.GLPetID IN ({pid_list})
+AND gl.GLDate < CAST(GETDATE() AS DATE)
+AND (gl.GLDeleted IS NULL OR gl.GLDeleted=0)
+AND (gl.GLWaitlist IS NULL OR gl.GLWaitlist=0)
+ORDER BY gl.GLDate DESC
+""")
+        svc_counts = {}
+        grm_counts = {}
+        for r in hist:
+            if len(r) < 6:
+                continue
+            pid       = r[0].strip()
+            gl_bath   = r[1].strip()
+            gl_groom  = r[2].strip()
+            others_id = r[3].strip()
+            nails_id  = r[4].strip()
+            groomer   = r[5].strip()
+            total_appts += 1
+
+            # True handstrip: GLOthersID > 0 AND no bath/groom flags (confirmed Oct 2025 pattern)
+            if others_id not in ('0', '', 'NULL') and gl_bath in ('0', '') and gl_groom in ('0', ''):
+                svc = 'Handstrip'
+            elif nails_id not in ('0', '', 'NULL') and gl_bath in ('0', '') and gl_groom in ('0', ''):
+                svc = 'Nails only'
+            elif gl_bath == '-1' and gl_groom == '-1':
+                svc = 'Full service'
+            elif gl_bath == '-1':
+                svc = 'Bath only'
+            elif gl_groom == '-1':
+                svc = 'Groom only'
+            else:
+                continue
+
+            if pid not in svc_counts:
+                svc_counts[pid] = Counter()
+                grm_counts[pid] = Counter()
+            svc_counts[pid][svc] += 1
+            if groomer:
+                grm_counts[pid][groomer] += 1
+
+        for pid in pet_ids:
+            if pid in svc_counts and svc_counts[pid]:
+                pet_data[pid]['service'] = svc_counts[pid].most_common(1)[0][0]
+            if pid in grm_counts and grm_counts[pid]:
+                top, top_n = grm_counts[pid].most_common(1)[0]
+                total_for_pet = sum(grm_counts[pid].values())
+                # Only flag preference if groomer is consistent (>50% AND at least 2 visits)
+                if top_n >= 2 and top_n / total_for_pet > 0.5:
+                    pet_data[pid]['groomer'] = top
+
+        # Override is_new_client if DBFCMClientStats was missing but history exists
+        if result['is_new_client'] and total_appts > 2:
+            result['is_new_client'] = False
+
+    # ── Build enriched pet list ────────────────────────────────────────────
+    all_last_grooms = []
+    for pid in pet_ids:
+        pd  = pet_data[pid]
+        lg  = pd['last_groom']
+        wks = None
+        if lg:
+            try:
+                wks = (_date.today() - _date.fromisoformat(lg)).days // 7
+            except Exception:
+                pass
+            all_last_grooms.append(lg)
+        result['pets'].append({
+            'name':        pd['name'],
+            'breed_name':  pd['breed_name'],
+            'size':        pd['size'],
+            'coat':        pd['coat'],
+            'age':         pd['age'],
+            'last_groom':  lg,
+            'weeks_since': wks,
+            'service':     pd['service'],
+            'groomer':     pd['groomer'],
+        })
+
+    # ── Client-level last visit (most recent across all pets) ──────────────
+    if all_last_grooms:
+        most_recent = max(all_last_grooms)
+        try:
+            delta = (_date.today() - _date.fromisoformat(most_recent)).days
+            result['last_visit'] = f"{friendly(most_recent)} ({delta}d ago)"
+        except Exception:
+            result['last_visit'] = most_recent
+
+    # ── Next scheduled appointment ─────────────────────────────────────────
+    na = _sql_query(f"""
+SELECT TOP 1 CONVERT(VARCHAR(10),gl.GLDate,120), p.PtPetName, ISNULL(e.USFNAME,'')
+FROM GroomingLog gl
+INNER JOIN Pets p ON gl.GLPetID=p.PtSeq
+LEFT JOIN Employees e ON gl.GLGroomerID=e.USSEQN
+WHERE p.PtOwnerCode={cid}
+AND gl.GLDate >= CAST(GETDATE() AS DATE)
+AND (gl.GLDeleted IS NULL OR gl.GLDeleted=0)
+AND (gl.GLWaitlist IS NULL OR gl.GLWaitlist=0)
+ORDER BY gl.GLDate, gl.GLInTime
+""")
+    if na and na[0] and len(na[0]) >= 3 and na[0][0].strip():
+        try:
+            na_str, pname, grm = na[0][0].strip(), na[0][1].strip(), na[0][2].strip()
+            result['next_appt'] = f"{friendly(na_str)} — {pname}" + (f" w/ {grm}" if grm else "")
+        except Exception:
+            result['next_appt'] = na[0][0].strip()
+
+    # ── Suggested next date (only when no future appts booked) ────────────
+    if result['future_count'] == 0 and result['avg_cadence_days']:
+        try:
+            cadence = result['avg_cadence_days']
+            pday    = result['preferred_day']
+            target  = _date.today() + _timedelta(days=cadence)
+            if pday:
+                day_map = {'monday':0,'tuesday':1,'wednesday':2,'thursday':3,
+                           'friday':4,'saturday':5,'sunday':6}
+                wd = day_map.get(pday.lower())
+                if wd is not None:
+                    snap = (wd - target.weekday()) % 7
+                    target = target + _timedelta(days=snap)
+            wks_str  = f"~{round(cadence / 7)} wks"
+            pday_str = f"{pday}, " if pday else ""
+            pt_str   = f" {result['preferred_time']}" if result['preferred_time'] else ""
+            result['suggested_next'] = f"{friendly(target.isoformat())} ({pday_str}{wks_str}{pt_str})"
+        except Exception:
+            pass
+
+    _dossier_cache[cid] = (result, now + 60)
+    return result
+
+
 # ── Scheduling-aware draft helpers ───────────────────────────────────────────
 
 _APPT_KEYWORDS = {
@@ -632,19 +965,28 @@ def _sms_load_scheduling_doc():
         return ''
 
 def _sms_get_compact_availability():
-    """Return a compact text block of the next ~8 open slots per active groomer."""
+    """Return a compact text block of the next ~8 open slots per active groomer.
+
+    14:30 is intentionally excluded — it is only offered when a human explicitly
+    requests it, not in auto-generated SMS suggestions.
+    """
     import datetime as dt
     today   = dt.date.today()
     end     = today + dt.timedelta(days=45)
     today_s = today.isoformat()
     end_s   = end.isoformat()
 
-    STD_SLOTS = ['08:30', '10:00', '11:30', '13:30', '14:30']
+    # 14:30 excluded from auto-suggestions (offer only if client specifically asks)
+    STD_SLOTS = ['08:30', '10:00', '11:30', '13:30']
     GROOMERS  = [
         (59, 'Kumi',     'handstrip only'),
         (85, 'Tomoko',   ''),
         (95, 'Mandilyn', 'LG/XL default'),
     ]
+
+    def slot_min(s):
+        h, m = int(s[:2]), int(s[3:])
+        return h * 60 + m
 
     # Closed / holiday dates
     hols = {r[0] for r in _sql_query(
@@ -657,16 +999,35 @@ def _sms_get_compact_availability():
         f"WHERE GLPetID=12120 AND GLDate>'{today_s}' AND GLDate<='{end_s}' "
         f"AND (GLDeleted IS NULL OR GLDeleted=0)") if r}
 
-    # Already-taken slots: set of (groomer_id, 'YYYY-MM-DD', 'HH:MM')
+    # Build blocked slots using real appointment durations (start + end time).
+    # A standard slot is blocked if any existing appointment overlaps it —
+    # i.e. appt_start <= slot_start < appt_end.
     taken = set()
-    for r in _sql_query(
-            f"SELECT GLGroomerID, CONVERT(VARCHAR(10),GLDate,120), "
-            f"CONVERT(VARCHAR(5),DATEADD(MINUTE,DATEDIFF(MINUTE,'1899-12-30',GLInTime),0),108) "
-            f"FROM GroomingLog WHERE GLDate>'{today_s}' AND GLDate<='{end_s}' "
-            f"AND (GLDeleted IS NULL OR GLDeleted=0) AND GLGroomerID IS NOT NULL"):
-        if len(r) == 3:
-            try: taken.add((int(r[0]), r[1], r[2]))
-            except: pass
+    appt_rows = _sql_query(
+        f"SELECT GLGroomerID, CONVERT(VARCHAR(10),GLDate,120), "
+        f"CONVERT(VARCHAR(5),DATEADD(MINUTE,DATEDIFF(MINUTE,'1899-12-30',GLInTime),0),108), "
+        f"CONVERT(VARCHAR(5),DATEADD(MINUTE,DATEDIFF(MINUTE,'1899-12-30',GLOutTime),0),108) "
+        f"FROM GroomingLog WHERE GLDate>'{today_s}' AND GLDate<='{end_s}' "
+        f"AND (GLDeleted IS NULL OR GLDeleted=0) "
+        f"AND (GLWaitlist IS NULL OR GLWaitlist=0) "
+        f"AND GLGroomerID IS NOT NULL "
+        f"AND GLInTime IS NOT NULL AND GLOutTime IS NOT NULL")
+    for r in appt_rows:
+        if len(r) < 4:
+            continue
+        try:
+            gid      = int(r[0])
+            date_s   = r[1]
+            start_m  = slot_min(r[2][:5])
+            end_m    = slot_min(r[3][:5])
+            if end_m <= start_m:  # bad data guard
+                end_m = start_m + 90
+            for s in STD_SLOTS:
+                sm = slot_min(s)
+                if start_m <= sm < end_m:
+                    taken.add((gid, date_s, s))
+        except Exception:
+            pass
 
     def working_days_for(gid):
         """Return set of date-strings when this groomer is scheduled."""
@@ -697,9 +1058,9 @@ def _sms_get_compact_availability():
             ds = d.isoformat()
             if d.weekday() == 0 or ds in hols or ds in limits or ds not in working:
                 continue
-            for slot in STD_SLOTS:
-                if (gid, ds, slot) not in taken:
-                    found.append(f"{d.strftime('%a %b')} {d.day} {slot}")
+            for s in STD_SLOTS:
+                if (gid, ds, s) not in taken:
+                    found.append(f"{d.strftime('%a %b')} {d.day} {s}")
             if len(found) >= 8:
                 break
         label = f"{name} ({note})" if note else name
@@ -794,15 +1155,13 @@ def _sms_regen_with_feedback(ctx, their_message, original_draft, feedback):
             print(f"[SMS] Availability lookup error in regen: {e}")
 
     system = (
-        "You are drafting SMS replies for Dog's Best Friend grooming salon, writing as Noah (owner). "
-        "Style: concise, start with 'Hi [FirstName]', no emojis, no exclamation marks, "
-        "use 'we/us' for the business, professional but warm. "
-        "IMPORTANT: We currently have no cat groomer on staff. Do not offer or book any cat grooming. "
-        "The only exception is Sadie Donnelly's nail trim. "
-        "When the client is asking about or proposing an appointment:\n"
-        "  • If they propose a specific date/time, check the real open slots and confirm or offer the closest alternatives.\n"
-        "  • If they ask for availability, offer 2-3 specific real open slots for the right groomer.\n"
-        "  • Only suggest slots from the REAL OPEN SLOTS list — never invent times.\n"
+        "You are drafting SMS replies for Dog's Best Friend grooming salon. Write as Noah, the owner — "
+        "small family business, direct and friendly, the way a real person texts. "
+        "Style rules: start with 'Hi [FirstName]', no emojis, no exclamation marks, no 'I'd be happy to', "
+        "no 'Great news', no corporate filler. Short sentences. Say what you mean. "
+        "IMPORTANT: No cat grooming — we have no cat groomer. Only exception: Sadie Donnelly nail trim. "
+        "For appointment requests: offer at most ONE or TWO specific slots, not a menu of options. "
+        "Pick the best fit and offer it. Only use slots from the REAL OPEN SLOTS list — never invent times. "
         "Respond with ONLY the message text — no quotes, no label, no explanation."
         f"{sched_rules}"
     )
@@ -842,15 +1201,13 @@ def _sms_generate_draft(ctx, their_message):
             print(f"[SMS] Availability lookup error: {e}")
 
     system = (
-        "You are drafting SMS replies for Dog's Best Friend grooming salon, writing as Noah (owner). "
-        "Style: concise, start with 'Hi [FirstName]', no emojis, no exclamation marks, "
-        "use 'we/us' for the business, professional but warm. "
-        "IMPORTANT: We currently have no cat groomer on staff. Do not offer or book any cat grooming. "
-        "The only exception is Sadie Donnelly's nail trim. "
-        "When the client is asking about or proposing an appointment:\n"
-        "  • If they propose a specific date/time, check the real open slots and confirm or offer the closest alternatives.\n"
-        "  • If they ask for availability, offer 2-3 specific real open slots for the right groomer.\n"
-        "  • Only suggest slots from the REAL OPEN SLOTS list — never invent times.\n"
+        "You are drafting SMS replies for Dog's Best Friend grooming salon. Write as Noah, the owner — "
+        "small family business, direct and friendly, the way a real person texts. "
+        "Style rules: start with 'Hi [FirstName]', no emojis, no exclamation marks, no 'I'd be happy to', "
+        "no 'Great news', no corporate filler. Short sentences. Say what you mean. "
+        "IMPORTANT: No cat grooming — we have no cat groomer. Only exception: Sadie Donnelly nail trim. "
+        "For appointment requests: offer at most ONE or TWO specific slots, not a menu of options. "
+        "Pick the best fit and offer it. Only use slots from the REAL OPEN SLOTS list — never invent times. "
         "Respond with ONLY the message text — no quotes, no label, no explanation."
         f"{sched_rules}"
     )
@@ -937,9 +1294,15 @@ def _handle_noah_inbound(msg_id: int, phone: str, message: str, timestamp: str):
     # Mark as handled immediately — don't show in staff SMS queue
     _sms_mark_handled(msg_id)
 
-    # Find the most recent unmatched sent escalation (if any)
+    log.info(f"[SMS] Noah inbound msg_id={msg_id}: '{message[:80]}'")
+
+    # Find the most recent unmatched escalation context. Check two sources:
+    # 1. _sent_escalations — escalations that were already sent via the extension
+    # 2. _sms_drafts — unsent escalation drafts (Know-a-bot may have created it but staff hasn't sent it yet)
     escalation_context = None
     matched_draft_id   = None
+
+    # Source 1: sent escalations (most reliable — staff already reviewed and sent)
     sorted_escs = sorted(
         _sent_escalations.items(),
         key=lambda x: x[1].get('sent_at', ''),
@@ -949,14 +1312,32 @@ def _handle_noah_inbound(msg_id: int, phone: str, message: str, timestamp: str):
         if not esc.get('matched'):
             escalation_context = esc.get('escalation_context', '')
             matched_draft_id   = draft_id
+            log.info(f"[SMS] Matched sent escalation {draft_id}: context='{escalation_context[:60]}'")
             break
+
+    # Source 2: unsent escalation drafts (fallback when staff hasn't sent yet)
+    if not escalation_context:
+        with _sms_drafts_lock:
+            unsent = sorted(
+                [d for d in _sms_drafts.values() if d.get('is_escalation')],
+                key=lambda d: d.get('timestamp', ''),
+                reverse=True,
+            )
+        if unsent:
+            escalation_context = unsent[0].get('escalation_context', '')
+            log.info(f"[SMS] Using unsent escalation context: '{escalation_context[:60]}'")
+
+    if not escalation_context:
+        log.info("[SMS] No escalation context found — KB extraction will run without context")
 
     # Ask Claude if the message is KB-worthy
     kb_result = _extract_kb_from_noah_reply(message, escalation_context)
+    log.info(f"[SMS] KB extraction result: {kb_result}")
 
     if kb_result:
         category, content = kb_result
         success = _append_to_knowledge_base(category, content)
+        log.info(f"[SMS] KB append success={success}: [{category}] {content[:80]}")
         if success and matched_draft_id:
             _sent_escalations[matched_draft_id]['matched'] = True
             _save_pending_escalations()
@@ -1138,7 +1519,8 @@ class WaitlistHandler(BaseHTTPRequestHandler):
             if not message:
                 self.send_json_response({'success': False, 'error': 'Message is required'})
                 return
-            result = self.get_chat_response(message)
+            operator_name = data.get('operator_name', 'Unknown').strip() or 'Unknown'
+            result = self.get_chat_response(message, operator_name)
             self.send_json_response(result)
         elif parsed_path.path == '/api/chat/reset':
             result = self.reset_chat()
@@ -1968,7 +2350,7 @@ class WaitlistHandler(BaseHTTPRequestHandler):
         except Exception as e:
             return {'success': False, 'error': str(e)}
 
-    def get_chat_response(self, message):
+    def get_chat_response(self, message, operator_name='Unknown'):
         """Send a message to Claude CLI via direct subprocess (no shell — avoids all quoting issues)."""
         global _claude_session_id, _system_prompt_file
 
@@ -1987,11 +2369,14 @@ class WaitlistHandler(BaseHTTPRequestHandler):
         else:
             session_args = ['--resume', _claude_session_id]
 
+        # Prepend operator identity so Know-a-bot always knows who's typing.
+        full_message = f"[Operator: {operator_name}]\n{message}"
+
         cmd = base + session_args + [
             '--mcp-config', MCP_CONFIG_WSL_PATH,
             '--allowedTools', MCP_ALLOWED_TOOLS,
             '--output-format', 'json',
-            message,
+            full_message,
         ]
 
         session_label = 'new' if _claude_session_id is None else _claude_session_id[:8] + '...'
@@ -2177,11 +2562,29 @@ ORDER BY gl.GLInTime, c.CLSeq
         return {'clients': list(clients.values()), 'count': len(clients)}
 
     def sms_get_drafts(self):
-        """Return list of pending SMS drafts sorted oldest first."""
+        """Return list of pending SMS drafts sorted oldest first, enriched with client dossier."""
         with _sms_drafts_lock:
             drafts = list(_sms_drafts.values())
         drafts.sort(key=lambda d: d['message_id'])
-        return {'drafts': drafts, 'count': len(drafts)}
+
+        # Enrich each non-escalation draft with a fresh client dossier (cached 60s).
+        # Deduplicate by client_id so multi-draft clients only query once.
+        seen = {}
+        enriched = []
+        for d in drafts:
+            cid = d.get('client_id')
+            if cid and not d.get('is_escalation'):
+                if cid not in seen:
+                    try:
+                        seen[cid] = _sms_get_client_dossier(cid)
+                    except Exception as e:
+                        log.warning(f"[SMS] Dossier fetch failed for client {cid}: {e}")
+                        seen[cid] = None
+                d = dict(d)  # shallow copy — don't mutate the shared draft dict
+                d['dossier'] = seen[cid]
+            enriched.append(d)
+
+        return {'drafts': enriched, 'count': len(enriched)}
 
     def sms_send(self, data):
         """Send an SMS via KCApp, attribute to Claude, mark inbound handled."""
@@ -2389,9 +2792,20 @@ ORDER BY gl.GLInTime, c.CLSeq
             return {'success': False, 'error': 'recipient and message are required'}
 
         if recipient.lower() == 'noah':
-            # Escalation draft to Noah's personal cell
-            draft_id = f"escalation-{uuid.uuid4().hex[:8]}"
+            # Deduplication: if an unsent escalation draft already exists, reuse it.
+            # This prevents double-drafts when Claude times out mid-run and the user retries.
             with _sms_drafts_lock:
+                existing = next(
+                    (d for d in _sms_drafts.values()
+                     if d.get('is_escalation') and d['draft_id'] not in _sent_escalations),
+                    None
+                )
+                if existing:
+                    log.info(f"[SMS] Escalation deduplicated — reusing {existing['draft_id']}")
+                    return {'success': True, 'draft_id': existing['draft_id']}
+
+                # No existing unsent escalation — create a new one
+                draft_id = f"escalation-{uuid.uuid4().hex[:8]}"
                 _sms_drafts[draft_id] = {
                     'draft_id':           draft_id,
                     'message_id':         0,
@@ -2665,7 +3079,7 @@ def run_server(port=8000):
     httpd = HTTPServer(server_address, WaitlistHandler)
 
     log.info('=' * 60)
-    log.info('Kennel Connection Backend Server')
+    log.info('DBFCM Extension Backend Server')
     log.info('=' * 60)
     log.info(f'Server running on: http://localhost:{port}')
     log.info(f'Log file: {_LOG_PATH}')

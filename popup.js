@@ -118,6 +118,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     await loadWaitlist();
     await loadGroomers();
 
+    // Detect KCApp operator for Know-a-bot (non-blocking)
+    getKCAppOperator();
+
     // Check backend status periodically
     setInterval(updateBackendStatusIndicator, 10000);
 });
@@ -140,6 +143,8 @@ function switchTab(tab) {
     if (tab === 'sms') loadSmsDrafts();
     // Auto-load Checkout tab when switched to
     if (tab === 'checkout') loadCheckout();
+    // Refresh operator detection when switching to chat tab
+    if (tab === 'chat') getKCAppOperator();
 }
 
 // Load configuration from storage
@@ -1285,6 +1290,113 @@ function appendChatBubble(role, text) {
     return bubble;
 }
 
+// ── KCApp operator detection ──────────────────────────────────────────────────
+// Cache: { name, fetchedAt } — refreshed every 5 minutes
+let _kcappOperatorCache = null;
+
+async function getKCAppOperator() {
+    const CACHE_MS = 5 * 60 * 1000;
+    if (_kcappOperatorCache && (Date.now() - _kcappOperatorCache.fetchedAt) < CACHE_MS) {
+        return _kcappOperatorCache.name;
+    }
+
+    let name = 'Unknown';
+    try {
+        const tabs = await chrome.tabs.query({ url: 'https://dbfcm.mykcapp.com/*' });
+        if (tabs.length) {
+            const [injection] = await chrome.scripting.executeScript({
+                target: { tabId: tabs[0].id },
+                world: 'MAIN',
+                func: async () => {
+                    // Approach 1: try KCApp's session endpoint
+                    try {
+                        const r = await fetch('/api/user/current', { credentials: 'include' });
+                        if (r.ok) {
+                            const d = await r.json();
+                            const n = d?.FullName || d?.Name || d?.UserName || d?.ReturnedObject?.FullName;
+                            if (n) return n;
+                        }
+                    } catch (_) {}
+
+                    // Approach 2: try /Account/GetCurrentUser (KC7 MVC pattern)
+                    try {
+                        const r = await fetch('/Account/GetCurrentUser', { credentials: 'include' });
+                        if (r.ok) {
+                            const d = await r.json();
+                            const n = d?.FullName || d?.Name || d?.ReturnedObject?.FullName;
+                            if (n) return n;
+                        }
+                    } catch (_) {}
+
+                    // Approach 3: read from DOM — KC7 nav bar typically shows employee name
+                    const selectors = [
+                        '.navbar-right .username',
+                        '.navbar .user-fullname',
+                        '.nav-user-name',
+                        '#user-display-name',
+                        '.current-user',
+                        '[data-user-name]',
+                        '.navbar-right a.dropdown-toggle',
+                        '.user-info .name',
+                        '.header-user',
+                        '#loggedInUser',
+                        '.logged-in-as',
+                        'li.dropdown > a[data-toggle="dropdown"]',
+                    ];
+                    for (const sel of selectors) {
+                        const el = document.querySelector(sel);
+                        if (el) {
+                            const txt = (el.dataset.userName || el.textContent || '').trim()
+                                .replace(/\s+/g, ' ');
+                            // Reject generic labels like "Account", "Menu", "Admin"
+                            if (txt && txt.length > 2 && txt.length < 60
+                                    && !['account','menu','admin','home','logout'].includes(txt.toLowerCase())) {
+                                return txt;
+                            }
+                        }
+                    }
+
+                    // Approach 4: check window globals that KC7 may expose
+                    const globals = ['currentUser', 'loggedInUser', 'employeeInfo', 'userInfo', 'AppUser'];
+                    for (const g of globals) {
+                        const v = window[g];
+                        if (v) {
+                            const n = (typeof v === 'string') ? v
+                                : (v.FullName || v.Name || v.UserName || v.name || '');
+                            if (n && n.length > 1) return n;
+                        }
+                    }
+
+                    return null;
+                }
+            });
+            if (injection?.result) name = injection.result;
+        }
+    } catch (e) {
+        console.warn('[Know-a-bot] Could not detect KCApp operator:', e.message);
+    }
+
+    _kcappOperatorCache = { name, fetchedAt: Date.now() };
+    updateOperatorBar(name);
+    return name;
+}
+
+function updateOperatorBar(name) {
+    const bar = document.getElementById('chat-operator-bar');
+    const label = document.getElementById('chat-operator-label');
+    if (!bar || !label) return;
+    bar.classList.remove('operator-noah', 'operator-unknown');
+    if (name === 'Unknown') {
+        label.textContent = 'Logged in as: Unknown (open KCApp to identify)';
+        bar.classList.add('operator-unknown');
+    } else if (name.toLowerCase().includes('noah') || name.toLowerCase().includes('han')) {
+        label.textContent = `Logged in as: ${name} (owner — full access)`;
+        bar.classList.add('operator-noah');
+    } else {
+        label.textContent = `Logged in as: ${name}`;
+    }
+}
+
 async function sendChatMessage() {
     const message = chatInput.value.trim();
     if (!message) return;
@@ -1296,11 +1408,14 @@ async function sendChatMessage() {
 
     const thinkingBubble = appendChatBubble('thinking', 'Know-a-bot is thinking…');
 
+    // Detect operator — run concurrently with the thinking display
+    const operator_name = await getKCAppOperator();
+
     try {
         const response = await fetch(`${config.backendUrl}/api/chat`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ message }),
+            body: JSON.stringify({ message, operator_name }),
             signal: AbortSignal.timeout(300000)  // 5 min — Claude CLI can be slow on first call
         });
 
@@ -1646,11 +1761,87 @@ function renderSmsDrafts(drafts) {
                <div class="sms-inbound">${escapeHtml(d.their_message)}</div>`
             : '';
 
+        // Build mini dossier HTML
+        let dossierHtml = '';
+        if (d.dossier) {
+            const dos = d.dossier;
+            const parts = [];
+
+            // NEW CLIENT badge
+            if (dos.is_new_client) {
+                parts.push(`<div class="sms-dossier-new">★ NEW CLIENT</div>`);
+            }
+
+            // Warning
+            if (dos.warning) {
+                parts.push(`<div class="sms-dossier-warning">⚠ ${escapeHtml(dos.warning)}</div>`);
+            }
+
+            // Per-pet rows: Name · Breed · Size/Coat · Age · service · groomer · N wks ago
+            (dos.pets || []).forEach(pet => {
+                const wks  = pet.weeks_since != null ? pet.weeks_since : null;
+                const over = wks != null && wks >= 8;
+
+                // Build descriptor: e.g. "Golden Retriever · LG/LH · 4y"
+                const descriptors = [];
+                if (pet.breed_name) descriptors.push(escapeHtml(pet.breed_name));
+                const sizeCoat = [pet.size, pet.coat].filter(Boolean).join('/');
+                if (sizeCoat) descriptors.push(sizeCoat);
+                if (pet.age)  descriptors.push(escapeHtml(pet.age));
+                const desc = descriptors.length ? ` <span class="sms-dossier-breed">${descriptors.join(' · ')}</span>` : '';
+
+                const svc = pet.service ? ` · ${escapeHtml(pet.service)}` : '';
+                const grm = pet.groomer ? ` · ${escapeHtml(pet.groomer)}` : '';
+                const age = wks != null
+                    ? ` · <span class="${over ? 'sms-dossier-overdue' : ''}">${wks} wks ago</span>`
+                    : '';
+                parts.push(`<div class="sms-dossier-pet">${escapeHtml(pet.name)}${desc}${svc}${grm}${age}</div>`);
+            });
+
+            // Booking / future appts row
+            const bookingParts = [];
+            if (dos.future_count > 0) {
+                bookingParts.push(`${dos.future_count} future booked`);
+            }
+            if (dos.next_appt) {
+                bookingParts.push(`Next: ${escapeHtml(dos.next_appt)}`);
+            }
+            if (dos.suggested_next) {
+                bookingParts.push(`Suggest: ${escapeHtml(dos.suggested_next)}`);
+            }
+            if (bookingParts.length) {
+                parts.push(`<div class="sms-dossier-booking">${bookingParts.join('  ·  ')}</div>`);
+            }
+
+            // Cadence / preferences row
+            const cadParts = [];
+            if (dos.avg_cadence_days) {
+                cadParts.push(`~${Math.round(dos.avg_cadence_days / 7)} wks cadence`);
+            }
+            if (dos.preferred_day) {
+                cadParts.push(`prefers ${escapeHtml(dos.preferred_day)}`);
+            }
+            if (dos.preferred_time) {
+                cadParts.push(escapeHtml(dos.preferred_time));
+            }
+            if (dos.last_visit) {
+                cadParts.push(`last ${escapeHtml(dos.last_visit)}`);
+            }
+            if (cadParts.length) {
+                parts.push(`<div class="sms-dossier-cadence">${cadParts.join('  ·  ')}</div>`);
+            }
+
+            if (parts.length) {
+                dossierHtml = `<div class="sms-dossier">${parts.join('')}</div>`;
+            }
+        }
+
         card.innerHTML = `
             <div class="sms-card-header">
                 <span>${escapeHtml(d.client_name)}</span>
                 <span class="sms-timestamp">${escapeHtml(ts)}</span>
             </div>
+            ${dossierHtml}
             ${threadHtml}
             ${inboundHtml}
             <div class="sms-draft-label">${d.draft ? 'Draft:' : 'Compose reply:'}</div>

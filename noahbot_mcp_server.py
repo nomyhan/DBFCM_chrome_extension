@@ -860,14 +860,15 @@ def _parse_time_slot(s: str) -> str:
 
 
 def tool_create_appointment(args: dict) -> str:
-    """Create a new appointment. Always unconfirmed — confirmation only happens via reminder text."""
+    """Create a new appointment or waitlist entry. Always unconfirmed — confirmation only happens via reminder text."""
     pet_id       = int(args.get('pet_id', 0))
     date         = _validate_date(args.get('date', ''))
-    raw_slot     = args.get('time_slot', '')
+    raw_slot     = args.get('time_slot', '09:00')  # default for waitlist entries
     groomer_id   = _validate_groomer_id(args.get('groomer_id', ''))
     service_type = args.get('service_type', 'full').lower().strip()
     bather_id    = int(args.get('bather_id', 8))
     duration_min = int(args.get('duration_minutes', 90))
+    is_waitlist  = bool(args.get('waitlist', False))
 
     # Validate service type
     if service_type not in ('full', 'bath_only', 'groom_only'):
@@ -923,8 +924,12 @@ ORDER BY GLDate DESC
     if service_type == 'bath_only':
         gl_rate = 0.0
 
-    # Check slot not already booked for this groomer
-    conflict_rows = _run_query(f"""
+    slot_h, slot_m = int(slot[:2]), int(slot[3:])
+    slot_start = slot_h * 60 + slot_m
+
+    # Only check for slot conflicts on real appointments (not waitlist entries)
+    if not is_waitlist:
+        conflict_rows = _run_query(f"""
 SELECT p.PtPetName, CONVERT(varchar, gl.GLInTime, 108), CONVERT(varchar, gl.GLOutTime, 108)
 FROM GroomingLog gl
 INNER JOIN Pets p ON gl.GLPetID = p.PtSeq
@@ -934,29 +939,26 @@ AND (gl.GLDeleted IS NULL OR gl.GLDeleted = 0)
 AND (gl.GLWaitlist IS NULL OR gl.GLWaitlist = 0)
 """, timeout=10)
 
-    slot_h, slot_m = int(slot[:2]), int(slot[3:])
-    slot_start = slot_h * 60 + slot_m
-    slot_end   = slot_start + duration_min
-
-    for line in conflict_rows:
-        if '\t' not in line:
-            continue
-        cf = _cols(line)
-        if len(cf) < 3:
-            continue
-        try:
-            bh, bm = int(cf[1][:2]), int(cf[1][3:5])
-            eh, em = int(cf[2][:2]), int(cf[2][3:5])
-            b_start = bh * 60 + bm
-            b_end   = eh * 60 + em
-            if slot_start < b_end and slot_end > b_start:
-                raise ValueError(
-                    f"Slot {slot} on {date} conflicts with existing appointment: "
-                    f"{cf[0]} at {cf[1][:5]}–{cf[2][:5]}."
-                )
-        except ValueError as e:
-            if 'conflicts' in str(e):
-                raise
+        slot_end = slot_start + duration_min
+        for line in conflict_rows:
+            if '\t' not in line:
+                continue
+            cf = _cols(line)
+            if len(cf) < 3:
+                continue
+            try:
+                bh, bm = int(cf[1][:2]), int(cf[1][3:5])
+                eh, em = int(cf[2][:2]), int(cf[2][3:5])
+                b_start = bh * 60 + bm
+                b_end   = eh * 60 + em
+                if slot_start < b_end and slot_end > b_start:
+                    raise ValueError(
+                        f"Slot {slot} on {date} conflicts with existing appointment: "
+                        f"{cf[0]} at {cf[1][:5]}–{cf[2][:5]}."
+                    )
+            except ValueError as e:
+                if 'conflicts' in str(e):
+                    raise
 
     # Build service flags
     if service_type == 'full':
@@ -972,6 +974,8 @@ AND (gl.GLWaitlist IS NULL OR gl.GLWaitlist = 0)
     in_time  = f"1899-12-30 {slot_h:02d}:{slot_m:02d}:00"
     out_time = f"1899-12-30 {out_h:02d}:{out_m:02d}:00"
 
+    gl_waitlist_val = -1 if is_waitlist else 0
+
     _run_update(f"""
 INSERT INTO GroomingLog
     (GLDate, GLInTime, GLOutTime, GLPetID, GLGroomerID, GLBatherID,
@@ -979,7 +983,7 @@ INSERT INTO GroomingLog
      GLTakenBy, GLRate, GLBathRate)
 VALUES
     ('{date}', '{in_time}', '{out_time}', {pet_id}, {groomer_id}, {bather_id},
-     {gl_bath}, {gl_groom}, {gl_others}, 0, 0, 0,
+     {gl_bath}, {gl_groom}, {gl_others}, 0, 0, {gl_waitlist_val},
      'CLD', {gl_rate}, {gl_bath_rate})
 """, timeout=15)
 
@@ -1001,6 +1005,17 @@ ORDER BY GLSeq DESC
     svc_label = {'full': 'Full Service', 'bath_only': 'Bath Only', 'groom_only': 'Groom Only'}[service_type]
     groomer_names = {8: 'Elmer', 59: 'Kumi', 85: 'Tomoko', 91: 'Josh', 94: 'Noah', 95: 'Mandilyn', 97: 'Guest'}
 
+    if is_waitlist:
+        return (
+            f"Waitlist entry created (GLSeq {glseq}):\n"
+            f"  Pet:     {pet_name} (ID:{pet_id}) for {client_name}\n"
+            f"  Target:  {date} (waitlist — not a firm booking)\n"
+            f"  Service: {svc_label}\n"
+            f"  Groomer: {groomer_names.get(groomer_id, str(groomer_id))}, "
+            f"Bather: {groomer_names.get(bather_id, str(bather_id))}\n"
+            f"  Pricing: ${gl_rate:.0f} + ${gl_bath_rate:.0f}\n"
+            f"  Status:  On Waitlist (GLWaitlist=-1)"
+        )
     return (
         f"Appointment created (GLSeq {glseq}):\n"
         f"  Pet:     {pet_name} (ID:{pet_id}) for {client_name}\n"
@@ -1252,9 +1267,10 @@ TOOLS = {
     "create_appointment": {
         "fn": tool_create_appointment,
         "description": (
-            "Create a new appointment in the database. "
-            "ALWAYS confirm with the user before calling — show pet name, date, time, groomer, and service type, "
-            "and explain that this will add a real appointment to the live system. "
+            "Create a new appointment or waitlist entry in the database. "
+            "For waitlist entries, set waitlist=true — no slot conflict check, date is a target date. "
+            "ALWAYS confirm with the user before calling — show pet name, date, groomer, service type, "
+            "and whether it is a real appointment or a waitlist entry. "
             "Never set appointments as confirmed; confirmation only comes via the reminder text system."
         ),
         "inputSchema": {
@@ -1266,11 +1282,11 @@ TOOLS = {
                 },
                 "date": {
                     "type": "string",
-                    "description": "Appointment date (YYYY-MM-DD)."
+                    "description": "Appointment date or target date for waitlist entries (YYYY-MM-DD)."
                 },
                 "time_slot": {
                     "type": "string",
-                    "description": "Start time. Standard slots: 08:30, 10:00, 11:30, 13:30, 14:30. Also accepts '10:00 AM' format."
+                    "description": "Start time. Standard slots: 08:30, 10:00, 11:30, 13:30, 14:30. Also accepts '10:00 AM' format. For waitlist entries defaults to 09:00."
                 },
                 "groomer_id": {
                     "type": "integer",
@@ -1288,9 +1304,13 @@ TOOLS = {
                 "duration_minutes": {
                     "type": "integer",
                     "description": "Appointment block length in minutes. Default: 90."
+                },
+                "waitlist": {
+                    "type": "boolean",
+                    "description": "Set true to add as a waitlist entry (GLWaitlist=-1) instead of a firm booking. No slot conflict check. Date is a target date."
                 }
             },
-            "required": ["pet_id", "date", "time_slot", "groomer_id"]
+            "required": ["pet_id", "date", "groomer_id"]
         }
     },
     "reassign_bather": {

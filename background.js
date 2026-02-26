@@ -30,7 +30,7 @@ async function updateBadge() {
 
 // Update badge on extension install/update
 chrome.runtime.onInstalled.addListener(() => {
-    console.log('WKennel7 Waitlist Viewer installed');
+    console.log('DBFCM Extension Backend installed');
     updateBadge();
 });
 
