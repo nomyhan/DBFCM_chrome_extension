@@ -1,11 +1,11 @@
 @echo off
-REM Start WKennel7 Waitlist Backend Server
+REM Start DBFCM Extension Backend Server
 REM Keep this window open while using the extension
 
-title WKennel7 Waitlist Backend Server
+title DBFCM Extension Backend Server
 
 echo ====================================================
-echo WKennel7 Waitlist Backend Server
+echo DBFCM Extension Backend Server
 echo ====================================================
 echo.
 echo Starting server on port 8000...
