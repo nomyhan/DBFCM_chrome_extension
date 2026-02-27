@@ -2178,4 +2178,3 @@ function renderBookingForm(container, draftId, clientId, extracted) {
         }
     };
 }
-

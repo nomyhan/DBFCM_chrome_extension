@@ -8,6 +8,7 @@ import sys
 sys.dont_write_bytecode = True  # prevent __pycache__ from appearing in the extension folder
 
 from http.server import HTTPServer, BaseHTTPRequestHandler
+import html as _html
 import re
 import subprocess
 import json
@@ -373,10 +374,56 @@ _sms_drafts = {}
 _sms_drafts_lock = threading.Lock()
 _sms_last_seen_id = 0   # watermark: last inbound MessageId processed
 
-# Dossier cache: client_id -> (dossier_dict, expires_at_unix)
-# Populated lazily when GET /api/sms/drafts is called; TTL 60s.
-_dossier_cache = {}
 _SMS_DRAFTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'sms_drafts.json')
+
+# Pending appointments briefings cache: appointment_id (str) → briefing dict
+_pending_briefings = {}
+_pending_briefings_lock = threading.Lock()
+
+# ── Centralized TTL cache ─────────────────────────────────────────────────────
+# All repeated SQL fetches go through canonical _get_*() functions that use this
+# cache. Never write inline SQL for data that multiple endpoints need.
+#
+# Naming convention:
+#   _get_<resource>(<params>)   — public-ish; checks cache, fetches if miss
+#   _fetch_<resource>(<params>) — private; raw SQL only, called by _get_* only
+#
+# Cache invalidation: call _cache.delete(key) or _cache.delete_prefix(prefix)
+#   after any write that would stale the cached data (e.g. after appt_book()).
+
+_TTL_DOSSIER       = 60      # seconds — client dossier (pets, visits, cadence)
+_TTL_COMPACT_AVAIL = 1800    # 30 min  — SMS compact availability text
+_TTL_HOLIDAYS      = 86400   # 24 hrs  — calendar holiday/closure dates
+
+class _TTLCache:
+    def __init__(self):
+        self._store = {}
+        self._lock  = threading.Lock()
+
+    def get(self, key):
+        with self._lock:
+            entry = self._store.get(key)
+            if entry and time.time() < entry['exp']:
+                return entry['val']
+            if entry:
+                del self._store[key]
+            return None
+
+    def set(self, key, value, ttl):
+        with self._lock:
+            self._store[key] = {'val': value, 'exp': time.time() + ttl}
+
+    def delete(self, key):
+        with self._lock:
+            self._store.pop(key, None)
+
+    def delete_prefix(self, prefix):
+        """Invalidate all keys starting with prefix (e.g. 'holidays:' after a closure change)."""
+        with self._lock:
+            for k in [k for k in self._store if k.startswith(prefix)]:
+                del self._store[k]
+
+_cache = _TTLCache()
 
 # ── Noah's personal cell numbers (for inbound routing) ───────────────────────
 # Texts from these numbers go to KB ingestion, not the staff SMS queue.
@@ -645,16 +692,13 @@ def _sms_get_client_dossier(client_id):
       avg_cadence_days — float or None
       suggested_next— "Apr 7 (Sat, ~6 wks)" or None   (only when future_count == 0)
     """
-    import time as _time
     from datetime import date as _date, timedelta as _timedelta
     from collections import Counter
 
     cid = int(client_id)
-    now = _time.time()
-    if cid in _dossier_cache:
-        cached_data, exp = _dossier_cache[cid]
-        if now < exp:
-            return cached_data
+    cached = _cache.get(f'dossier:{cid}')
+    if cached is not None:
+        return cached
 
     MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
 
@@ -939,7 +983,7 @@ ORDER BY gl.GLDate, gl.GLInTime
         except Exception:
             pass
 
-    _dossier_cache[cid] = (result, now + 60)
+    _cache.set(f'dossier:{cid}', result, _TTL_DOSSIER)
     return result
 
 
@@ -968,12 +1012,33 @@ def _sms_load_scheduling_doc():
     except Exception:
         return ''
 
+def _get_holidays(start_date_str, days=45):
+    """Canonical holiday fetch — cached 24h. Use this instead of inline Calendar queries."""
+    key = f'holidays:{start_date_str}:{days}'
+    cached = _cache.get(key)
+    if cached is not None:
+        return cached
+    rows = _sql_query(
+        f"SELECT CONVERT(VARCHAR(10), Date, 120) FROM Calendar "
+        f"WHERE Date BETWEEN '{start_date_str}' "
+        f"AND DATEADD(day,{days},'{start_date_str}') "
+        f"AND Styleset IN ('HOLIDAY','CLOSED')"
+    )
+    result = {r[0] for r in rows if r}
+    _cache.set(key, result, _TTL_HOLIDAYS)
+    return result
+
+
 def _sms_get_compact_availability():
     """Return a compact text block of the next ~8 open slots per active groomer.
 
     14:30 is intentionally excluded — it is only offered when a human explicitly
     requests it, not in auto-generated SMS suggestions.
     """
+    cached = _cache.get('compact_avail')
+    if cached is not None:
+        return cached
+
     import datetime as dt
     today   = dt.date.today()
     end     = today + dt.timedelta(days=45)
@@ -993,9 +1058,7 @@ def _sms_get_compact_availability():
         return h * 60 + m
 
     # Closed / holiday dates
-    hols = {r[0] for r in _sql_query(
-        f"SELECT CONVERT(VARCHAR(10),Date,120) FROM Calendar "
-        f"WHERE Date>'{today_s}' AND Date<='{end_s}' AND Styleset<>'None'") if r}
+    hols = _get_holidays(today_s, 45)
 
     # LIMIT-blocked dates
     limits = {r[0] for r in _sql_query(
@@ -1069,7 +1132,9 @@ def _sms_get_compact_availability():
                 break
         label = f"{name} ({note})" if note else name
         lines.append(f"{label}: " + (', '.join(found[:8]) if found else 'no slots in next 45 days'))
-    return '\n'.join(lines)
+    result_text = '\n'.join(lines)
+    _cache.set('compact_avail', result_text, _TTL_COMPACT_AVAIL)
+    return result_text
 
 def _run_one_shot_claude(system_text, user_msg, timeout=60):
     """Run a one-shot claude -p call.  Returns the result string or None."""
@@ -1137,6 +1202,397 @@ def _suggest_next_date(avg_cadence_days, preferred_day):
             delta = (wd - target.weekday()) % 7
             target = target + timedelta(days=delta)
     return target.strftime('%m/%d/%Y')
+
+
+# ── PENDING TAB — RESERVED FOR FUTURE IMPLEMENTATION ─────────────────────────
+# Frontend removed Feb 2026. Backend logic preserved as implementation record.
+# See git history (popup.js) for frontend reference.
+
+# ── Pending Appointments Intelligence ─────────────────────────────────────────
+
+def _parse_pending_html(html):
+    """Extract pending appointment data from KCApp pendinglist HTML using regex."""
+    appointments = []
+
+    # Find all pending appointment block IDs (div id="pendingapp_XXXXXXX")
+    appt_ids = re.findall(r'id=["\']pendingapp_(\d+)["\']', html)
+    if not appt_ids:
+        return appointments
+
+    for appt_id in appt_ids:
+        appt = {'appointment_id': int(appt_id), 'contract_terms': ''}
+
+        # Extract a chunk of HTML for this appointment block
+        idx = html.find(f'pendingapp_{appt_id}')
+        if idx == -1:
+            continue
+        chunk = html[idx:idx + 10000]
+
+        # Date/time string: e.g. "4/29 at 10am", "03/15/2026 at 8:30am"
+        m = re.search(r'(\d{1,2}/\d{1,2}(?:/\d{2,4})?\s+at\s+\d{1,2}(?::\d{2})?\s*[ap]m)',
+                      chunk, re.IGNORECASE)
+        appt['date_str'] = m.group(1).strip() if m else ''
+
+        # Client: href="/#/clients/details/123" with anchor text
+        m = re.search(r'href=["\'](?:/#|#)?/clients/details/(\d+)["\'][^>]*>([^<]+)', chunk)
+        if m:
+            appt['client_id'] = int(m.group(1))
+            appt['client_name'] = m.group(2).strip()
+        else:
+            appt['client_id'] = None
+            appt['client_name'] = ''
+
+        # Pet: href="/#/pets/details/123"
+        m = re.search(r'href=["\'](?:/#|#)?/pets/details/(\d+)["\'][^>]*>([^<]+)', chunk)
+        if m:
+            appt['pet_id'] = int(m.group(1))
+            appt['pet_name'] = m.group(2).strip()
+        else:
+            appt['pet_id'] = None
+            appt['pet_name'] = ''
+
+        # Requested employee
+        m = re.search(r'<em>Employee:\s*([^<]+)</em>', chunk, re.IGNORECASE)
+        appt['employee_requested'] = m.group(1).strip() if m else 'Any Groomer'
+
+        # Services (Items-Description spans) — unescape HTML entities (&nbsp; etc.)
+        services = re.findall(r'class=["\']Items-Description["\'][^>]*>([^<]+)', chunk)
+        appt['services'] = [_html.unescape(s).strip() for s in services if s.strip()]
+
+        # Contract terms — look for "accepted"/"rejected" text near term keywords
+        terms_m = re.search(r'(REJECTED|ACCEPTED)[^<]*(?:rabies|vaccination|contract|terms)[^<]*',
+                             chunk, re.IGNORECASE)
+        if terms_m:
+            appt['contract_terms'] = terms_m.group(0).strip()
+
+        # Default denial / waitlist email textarea content
+        m = re.search(
+            rf'id=["\']denyconfirmation_email_{appt_id}_default["\'][^>]*>(.*?)</textarea>',
+            chunk, re.DOTALL)
+        appt['denial_email'] = _html.unescape(re.sub(r'<[^>]+>', '', m.group(1)).strip()) if m else ''
+
+        m = re.search(
+            rf'id=["\']waitlistconfirmation_email_{appt_id}_default["\'][^>]*>(.*?)</textarea>',
+            chunk, re.DOTALL)
+        appt['waitlist_email'] = _html.unescape(re.sub(r'<[^>]+>', '', m.group(1)).strip()) if m else ''
+
+        appointments.append(appt)
+
+    return appointments
+
+
+def _parse_requested_date(date_str):
+    """Parse '4/29 at 10am' or '03/15/2026 at 8:30am' → 'YYYY-MM-DD'. Returns None if unparseable."""
+    m = re.search(r'(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?', date_str or '')
+    if not m:
+        return None
+    month, day = int(m.group(1)), int(m.group(2))
+    year_raw = m.group(3)
+    year = int(year_raw) if year_raw else datetime.now().year
+    if year < 100:
+        year += 2000
+    try:
+        dt = datetime(year, month, day)
+        if dt < datetime.now() and not year_raw:
+            dt = datetime(year + 1, month, day)
+        return dt.strftime('%Y-%m-%d')
+    except Exception:
+        return None
+
+
+def _enrich_pending_appt(appt):
+    """Add DB context to a parsed appointment dict (mutates in place)."""
+    client_id = appt.get('client_id')
+    pet_id = appt.get('pet_id')
+
+    appt['db'] = {
+        'client_warning': '', 'client_notes': '', 'client_discount': '',
+        'client_inactive': False, 'phone': '',
+        'pet_warning': '', 'pet_groom': '', 'pet_notes': '',
+        'is_new_pet': False, 'is_new_client': False,
+        'history': [], 'total_appts': 0,
+        'day_groomer_load': {}, 'requested_date': '',
+    }
+
+    if client_id:
+        rows = _sql_query(
+            f"SELECT CLWarning, CLNotes, CLInvoiceWarning, CLPhone1, CLDiscount, CLInactive "
+            f"FROM Clients WHERE CLSeq = {client_id}")
+        if rows and rows[0] and len(rows[0]) >= 6:
+            r = rows[0]
+            appt['db']['client_warning']  = (r[0] or '').strip()
+            appt['db']['client_notes']    = (r[1] or '').strip()
+            appt['db']['client_discount'] = (r[2] or '').strip()
+            appt['db']['phone']           = (r[3] or '').strip()
+            appt['db']['client_inactive'] = str(r[5] or '').strip() == '-1'
+
+    if pet_id:
+        rows = _sql_query(
+            f"SELECT PtWarning, PtGroom, PtNotes, PtPetName "
+            f"FROM Pets WHERE PtSeq = {pet_id}")
+        if rows and rows[0] and len(rows[0]) >= 4:
+            r = rows[0]
+            appt['db']['pet_warning'] = (r[0] or '').strip()
+            appt['db']['pet_groom']   = (r[1] or '').strip()
+            appt['db']['pet_notes']   = (r[2] or '').strip()
+            appt['db']['is_new_pet']  = ':NEW' in str(r[3] or '').upper()
+
+        # Appointment history (last 12 completed)
+        rows = _sql_query(
+            f"SELECT TOP 12 CONVERT(varchar, gl.GLDate, 23), ISNULL(e.USFNAME, 'Unknown'), "
+            f"CASE WHEN gl.GLNoShow=-1 THEN 'NOSHOW' ELSE 'OK' END "
+            f"FROM GroomingLog gl LEFT JOIN Employees e ON gl.GLGroomerID = e.USSEQN "
+            f"WHERE gl.GLPetID = {pet_id} "
+            f"AND (gl.GLDeleted IS NULL OR gl.GLDeleted=0) "
+            f"AND (gl.GLWaitlist IS NULL OR gl.GLWaitlist=0) "
+            f"ORDER BY gl.GLDate DESC")
+        appt['db']['history'] = [
+            {'date': r[0], 'groomer': r[1], 'status': r[2]}
+            for r in rows if r and len(r) >= 3
+        ]
+
+        # Total completed appointment count
+        rows = _sql_query(
+            f"SELECT COUNT(*) FROM GroomingLog "
+            f"WHERE GLPetID = {pet_id} "
+            f"AND (GLDeleted IS NULL OR GLDeleted=0) "
+            f"AND (GLWaitlist IS NULL OR GLWaitlist=0)")
+        if rows and rows[0]:
+            try:
+                appt['db']['total_appts'] = int(rows[0][0])
+            except Exception:
+                pass
+
+        appt['db']['is_new_client'] = appt['db']['total_appts'] < 1
+
+    # Day-of schedule context
+    requested_date = _parse_requested_date(appt.get('date_str', ''))
+    if requested_date:
+        appt['db']['requested_date'] = requested_date
+        rows = _sql_query(
+            f"SELECT e.USFNAME, COUNT(*) "
+            f"FROM GroomingLog gl INNER JOIN Employees e ON gl.GLGroomerID = e.USSEQN "
+            f"WHERE gl.GLDate = '{requested_date}' "
+            f"AND (gl.GLDeleted IS NULL OR gl.GLDeleted=0) "
+            f"AND (gl.GLWaitlist IS NULL OR gl.GLWaitlist=0) "
+            f"GROUP BY e.USFNAME")
+        appt['db']['day_groomer_load'] = {
+            r[0]: int(r[1]) for r in rows if r and len(r) >= 2
+        }
+
+
+def _build_pending_prompt(appointments):
+    """Build the combined one-shot Claude prompt for all pending appointments."""
+    lines = [
+        "You are a grooming salon assistant at Dog's Best Friend & The Cat's Meow (Albany, CA).",
+        "Analyze the following online appointment requests and provide a briefing for each.",
+        "",
+        "BUSINESS RULES:",
+        "- Open Tue–Sat 8:30am–5:30pm. Closed Sun/Mon.",
+        "- GROOMER ASSIGNMENT by size (from the size code in the service name):",
+        "  XS/SM → Tomoko (ID 85); MD → Tomoko or Mandilyn; LG/XL → Mandilyn (ID 95).",
+        "  New clients (0 prior appointments) always go to Mandilyn regardless of size.",
+        "- Kumi (ID 59): handstrip ONLY. A pet is a handstrip candidate ONLY when '#' appears",
+        "  in the pet name as stored in our DB. Do NOT infer handstrip from breed name alone.",
+        "  If '#' is NOT in the pet name, never suggest or discuss handstrip.",
+        "- Elmer (ID 8): primary bather. Josh (ID 91): backup bather.",
+        "- More than 5 dogs/day for a groomer = at capacity — flag it.",
+        "- ':NEW' in pet name = not yet had first completed appointment.",
+        "- No cat grooming (exception: Sadie Donnelly nail trim only).",
+        "- VACCINATIONS: we take the client's word — we do not require proof of vaccination.",
+        "  Clients are welcome to bring documentation but it is not required or asked for.",
+        "  A rejected rabies vaccine contract term should be mentioned as a note only;",
+        "  do NOT make it an action step or ask the client to provide proof.",
+        "- DUPLICATE APPOINTMENTS: only flag if two of the pet's upcoming appointments are",
+        "  within 3 weeks of each other AND the same service type (e.g. two full grooms).",
+        "  A bath and a full-groom appointment even close together is normal and intentional.",
+        "  Multiple future appointments spread out are completely normal — do not flag them.",
+        "- If a client has always booked with one specific groomer, note 'Any Groomer' requests.",
+        "",
+        "YOUR PRIMARY ANALYSIS for each request (cover all four in your briefing):",
+        "1. DATE/TIME — Is the requested day a business day (Tue–Sat)? Is the time within",
+        "   8:30am–5:30pm? Flag if the date falls on a Sunday or Monday.",
+        "2. GROOMER FIT — Extract the size code from the service name (e.g. 'MDLH' → MD).",
+        "   Is the requested groomer (or 'Any Groomer') appropriate for that size?",
+        "   For 'Any Groomer', recommend the best fit and note if they are available.",
+        "3. CAPACITY — How many dogs does the target groomer already have that day?",
+        "   Flag if at or near capacity (≥5).",
+        "4. CLIENT/PET FLAGS — Any warnings, inactive status, no-shows, or notes staff",
+        "   should see before approving.",
+        "",
+    ]
+
+    for i, appt in enumerate(appointments, 1):
+        db = appt.get('db', {})
+        history = db.get('history', [])
+
+        groomer_counts = {}
+        noshow_count = 0
+        for h in history:
+            g = h.get('groomer', 'Unknown')
+            groomer_counts[g] = groomer_counts.get(g, 0) + 1
+            if h.get('status') == 'NOSHOW':
+                noshow_count += 1
+        groomer_hist = ', '.join(f"{g}: {c}" for g, c in groomer_counts.items()) or 'None'
+        last_visit = history[0]['date'] if history else 'Never'
+
+        day_load = db.get('day_groomer_load', {})
+        day_load_str = (', '.join(f"{g}: {c}" for g, c in day_load.items())
+                        if day_load else 'No appointments yet that day')
+
+        # Compute day-of-week label for the requested date so Claude can check business hours
+        requested_date = db.get('requested_date', '')
+        day_of_week = ''
+        if requested_date:
+            try:
+                from datetime import datetime as _dt
+                day_of_week = _dt.strptime(requested_date, '%Y-%m-%d').strftime('%A')
+            except Exception:
+                pass
+
+        pet_name_display = appt.get('pet_name', 'Unknown')
+        is_handstrip_candidate = '#' in pet_name_display
+
+        lines += [
+            "---", "",
+            f"APPOINTMENT {i} (ID: {appt['appointment_id']}):",
+            "REQUEST:",
+            f"- Client: {appt.get('client_name', 'Unknown')} "
+            f"(ID {appt.get('client_id', '?')}) | Phone: {db.get('phone', 'unknown')}",
+            f"- Pet: {pet_name_display} (ID {appt.get('pet_id', '?')}) "
+            f"| Handstrip candidate (#): {'YES' if is_handstrip_candidate else 'NO'}",
+            f"- Requested date: {appt.get('date_str', 'Unknown')}"
+            + (f" ({day_of_week})" if day_of_week else ""),
+            f"- Groomer preference: {appt.get('employee_requested', 'Any Groomer')}",
+            f"- Services: {', '.join(appt.get('services', [])) or 'Not specified'}",
+        ]
+        if appt.get('contract_terms'):
+            lines.append(f"- Contract terms (note only — no proof required): {appt['contract_terms']}")
+
+        lines += [
+            "",
+            "DATABASE CONTEXT:",
+            f"- New client: {'Yes' if db.get('is_new_client') else 'No'} "
+            f"({db.get('total_appts', 0)} prior completed appointments)",
+            f"- New pet (:NEW in name): {'Yes' if db.get('is_new_pet') else 'No'}",
+            f"- Groomer history: {groomer_hist}",
+            f"- Last visit: {last_visit}  |  No-shows: {noshow_count}",
+            f"- Client warnings: {db.get('client_warning') or 'none'}",
+            f"- Client discount: {db.get('client_discount') or 'none'}",
+            f"- Client inactive flag: {'Yes' if db.get('client_inactive') else 'No'}",
+            f"- Pet warnings: {db.get('pet_warning') or 'none'}",
+            f"- Pet groom notes: {db.get('pet_groom') or 'none'}",
+            f"- Groomer load on {day_of_week or requested_date}: {day_load_str}",
+            "",
+        ]
+
+    lines += [
+        "---", "",
+        "For EACH appointment output EXACTLY this format:",
+        "### BRIEFING {appointment_id}",
+        "[One-sentence summary of what is being requested]",
+        "[Flag bullets: start each with ⚠️ for concerns, ✓ for OK items]",
+        "Action steps:",
+        "1. [first concrete action]",
+        "2. [next step]",
+        "(add more steps as needed)",
+        "### END {appointment_id}",
+        "",
+        "Replace {appointment_id} with the actual numeric ID. Output ONLY the briefings — no preamble.",
+    ]
+    return '\n'.join(lines)
+
+
+def _get_pending_briefings_from_claude(appointments):
+    """Call Claude with the combined pending prompt. Returns list of briefing dicts."""
+    if not appointments:
+        return []
+
+    prompt = _build_pending_prompt(appointments)
+    system_text = (
+        "You are a knowledgeable grooming salon assistant. Provide concise, actionable briefings "
+        "for appointment requests. Focus on flags and action steps staff need right now. "
+        "Output ONLY the briefings in the specified format — no preamble, no summary at the end."
+    )
+
+    t0 = datetime.now()
+    log.info(f"[Pending] Calling Claude for {len(appointments)} appointment(s)...")
+
+    # Write system prompt to a temp file (same as _run_one_shot_claude).
+    # Pass the user message via stdin instead of as a CLI arg — multi-line prompts get
+    # mangled by Windows list2cmdline when passed as an argument through WSL.
+    raw = None
+    sys_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as sf:
+            sf.write(system_text)
+            sys_path = sf.name
+
+        if IS_WINDOWS:
+            sys_wsl = _win_to_wsl_path(sys_path)
+            cmd = ['wsl', WSL_CLAUDE_PATH, '-p',
+                   '--system-prompt-file', sys_wsl, '--output-format', 'json']
+        else:
+            cmd = [WSL_CLAUDE_PATH, '-p',
+                   '--system-prompt-file', sys_path, '--output-format', 'json']
+
+        result = subprocess.run(cmd, input=prompt, capture_output=True,
+                                encoding='utf-8', errors='replace', timeout=120)
+        if sys_path:
+            os.unlink(sys_path)
+
+        if result.returncode == 0 and result.stdout.strip():
+            try:
+                raw = json.loads(result.stdout.strip()).get('result', '').strip()
+            except json.JSONDecodeError as e:
+                log.warning(f"[Pending] JSON parse error: {e}. stdout={result.stdout[:200]}")
+        else:
+            log.warning(f"[Pending] CLI exit={result.returncode} stderr={result.stderr[:300]}")
+    except subprocess.TimeoutExpired:
+        log.warning("[Pending] Claude CLI timed out after 120s")
+        if sys_path and os.path.exists(sys_path):
+            os.unlink(sys_path)
+    except Exception as e:
+        log.warning(f"[Pending] Claude CLI exception: {e}")
+        if sys_path and os.path.exists(sys_path):
+            os.unlink(sys_path)
+
+    elapsed = (datetime.now() - t0).seconds
+    log.info(f"[Pending] Claude call done in {elapsed}s, got {len(raw or '')} chars")
+
+    if not raw:
+        log.warning("[Pending] Claude returned no output")
+        return [{
+            **{k: v for k, v in a.items() if k != 'db'},
+            'briefing': '(AI analysis unavailable — check backend logs)',
+            'denial_email': a.get('denial_email', ''),
+            'waitlist_email': a.get('waitlist_email', ''),
+        } for a in appointments]
+
+    # Parse response: ### BRIEFING {id} ... ### END {id}
+    briefing_map = {}
+    for m in re.finditer(r'###\s*BRIEFING\s+(\d+)\s*\n(.*?)###\s*END\s+\1', raw, re.DOTALL):
+        briefing_map[m.group(1)] = m.group(2).strip()
+
+    results = []
+    for appt in appointments:
+        aid = str(appt['appointment_id'])
+        briefing = briefing_map.get(aid, f'(Could not parse briefing for ID {aid})')
+        results.append({
+            'appointment_id': appt['appointment_id'],
+            'date_str':           appt.get('date_str', ''),
+            'client_name':        appt.get('client_name', ''),
+            'client_id':          appt.get('client_id'),
+            'pet_name':           appt.get('pet_name', ''),
+            'pet_id':             appt.get('pet_id'),
+            'employee_requested': appt.get('employee_requested', 'Any Groomer'),
+            'services':           appt.get('services', []),
+            'contract_terms':     appt.get('contract_terms', ''),
+            'briefing':           briefing,
+            'denial_email':       appt.get('denial_email', ''),
+            'waitlist_email':     appt.get('waitlist_email', ''),
+        })
+    return results
 
 
 def _sms_regen_with_feedback(ctx, their_message, original_draft, feedback):
@@ -1555,6 +2011,9 @@ class WaitlistHandler(BaseHTTPRequestHandler):
             self.send_json_response(result)
         elif parsed_path.path == '/api/appt/book':
             result = self.appt_book(data)
+            self.send_json_response(result)
+        elif parsed_path.path == '/api/pending/analyze':
+            result = self.analyze_pending_appointments(data.get('html', ''))
             self.send_json_response(result)
         else:
             self.send_error_response(404, 'Not found')
@@ -3015,6 +3474,9 @@ ORDER BY gl.GLInTime, c.CLSeq
             f"('{date}','{in_time}','{out_time}',{pet_id},{g_val},{b_val},{o_val},"
             f"{gl_bath},{gl_groom},NULL,0,0,0,'CLD',{gl_rate},{gl_bath_rate})")
 
+        _cache.delete('compact_avail')       # next SMS draft gets fresh slot list
+        _cache.delete_prefix('holidays:')    # cheap; ensures holiday changes propagate
+
         seq_rows = _sql_query(
             f"SELECT MAX(GLSeq) FROM GroomingLog "
             f"WHERE GLPetID={pet_id} AND GLDate='{date}' AND GLTakenBy='CLD'")
@@ -3025,6 +3487,71 @@ ORDER BY gl.GLInTime, c.CLSeq
 
         print(f"[SMS/Book] Created GLSeq={new_seq} PetID={pet_id} {date} {appt_time} svc={service}")
         return {'success': True, 'glseq': new_seq}
+
+    def analyze_pending_appointments(self, html):
+        """Parse pending HTML from KCApp, enrich with DB data, get Claude briefings."""
+        global _pending_briefings
+
+        if not html or not html.strip():
+            return {'briefings': [], 'count': 0, 'error': 'No HTML provided'}
+
+        appointments = _parse_pending_html(html)
+        log.info(f"[Pending] Parsed {len(appointments)} appointment(s) from {len(html)}-byte HTML")
+
+        if not appointments:
+            snippet = html[:300].replace('\n', ' ')
+            log.info(f"[Pending] No pendingapp_ divs found. HTML snippet: {snippet}")
+            return {'briefings': [], 'count': 0}
+
+        # Prune stale cache entries (IDs not in current list)
+        current_ids = {str(a['appointment_id']) for a in appointments}
+        with _pending_briefings_lock:
+            stale = [k for k in list(_pending_briefings.keys()) if k not in current_ids]
+            for k in stale:
+                del _pending_briefings[k]
+            cached_ids = set(_pending_briefings.keys())
+
+        to_analyze = [a for a in appointments if str(a['appointment_id']) not in cached_ids]
+
+        if to_analyze:
+            log.info(f"[Pending] Enriching {len(to_analyze)} new appointment(s) with DB data...")
+            for appt in to_analyze:
+                _enrich_pending_appt(appt)
+
+            log.info(f"[Pending] Requesting AI briefings for {len(to_analyze)} appointment(s)...")
+            new_briefings = _get_pending_briefings_from_claude(to_analyze)
+
+            with _pending_briefings_lock:
+                for b in new_briefings:
+                    _pending_briefings[str(b['appointment_id'])] = b
+        else:
+            log.info(f"[Pending] All {len(appointments)} appointment(s) served from cache")
+
+        # Assemble final response preserving HTML order
+        result_briefings = []
+        with _pending_briefings_lock:
+            for appt in appointments:
+                aid = str(appt['appointment_id'])
+                cached = _pending_briefings.get(aid)
+                if cached:
+                    result_briefings.append(cached)
+                else:
+                    result_briefings.append({
+                        'appointment_id':   appt['appointment_id'],
+                        'date_str':         appt.get('date_str', ''),
+                        'client_name':      appt.get('client_name', ''),
+                        'client_id':        appt.get('client_id'),
+                        'pet_name':         appt.get('pet_name', ''),
+                        'pet_id':           appt.get('pet_id'),
+                        'employee_requested': appt.get('employee_requested', ''),
+                        'services':         appt.get('services', []),
+                        'contract_terms':   appt.get('contract_terms', ''),
+                        'briefing':         '(Analysis unavailable)',
+                        'denial_email':     '',
+                        'waitlist_email':   '',
+                    })
+
+        return {'briefings': result_briefings, 'count': len(result_briefings)}
 
     def log_message(self, format, *args):
         # Custom logging
