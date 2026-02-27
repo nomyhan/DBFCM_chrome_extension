@@ -747,80 +747,58 @@ ORDER BY bt.BTDate, e.USFNAME
 
 
 def tool_append_note(args: dict) -> str:
-    """Append a timestamped note to a client or pet record."""
+    """Insert a structured note into ClientNotes or PetNotes table."""
     entity_type = args.get('entity_type', '').lower().strip()
     entity_id   = args.get('entity_id', '')
-    field       = args.get('field', '').strip()
+    subject     = (args.get('subject', '') or '').strip()[:50]
     text        = args.get('text', '').strip()
 
-    # Validate entity type
     if entity_type not in ('client', 'pet'):
         raise ValueError("entity_type must be 'client' or 'pet'.")
 
-    # Validate entity_id is integer
     try:
         eid = int(entity_id)
     except (ValueError, TypeError):
         raise ValueError("entity_id must be a valid integer.")
 
-    # Validate field against allowlist
-    allowed_fields = {
-        'client': ('CLNotes', 'CLWarning'),
-        'pet':    ('PtNotes', 'PtWarning', 'PtGroom'),
-    }
-    allowed = allowed_fields[entity_type]
-    if field not in allowed:
-        raise ValueError(
-            f"Field '{field}' is not allowed for {entity_type}. "
-            f"Allowed: {', '.join(allowed)}"
-        )
-
-    # Validate and escape note text
     safe_text = _validate_note_text(text)
 
-    # Timestamp prefix
-    today = date.today().strftime('%Y-%m-%d')
-    note_entry = f"[{today} Noah-bot]: {safe_text}"
+    if not subject:
+        subject = safe_text[:47].rstrip() + ('…' if len(safe_text) > 47 else '')
+    safe_subj = subject.replace("'", "''")
+    safe_body = safe_text.replace("'", "''")
 
     if entity_type == 'client':
-        table = 'Clients'
-        pk    = 'CLSeq'
-        name_cols = "CLFirstName + ' ' + CLLastName"
-        # Verify client exists
         check = _run_query(
-            f"SELECT {name_cols} FROM {table} WHERE {pk} = {eid} "
-            f"AND (CLDeleted IS NULL OR CLDeleted = 0)",
+            f"SELECT CLFirstName + ' ' + CLLastName FROM Clients WHERE CLSeq={eid} "
+            f"AND (CLDeleted IS NULL OR CLDeleted=0)",
             timeout=10
         )
         if not check or not any(l.strip() for l in check):
             raise ValueError(f"Client ID {eid} not found.")
         entity_name = check[0].strip()
-        # Append note
         _run_update(
-            f"UPDATE {table} SET {field} = ISNULL({field}, '') + CHAR(13) + CHAR(10) + "
-            f"'{note_entry}' WHERE {pk} = {eid}",
+            f"INSERT INTO ClientNotes (CNClientSeq,CNDate,CNSubject,CNBy,CNNotes,CNLOCSEQ) "
+            f"VALUES ({eid},GETDATE(),'{safe_subj}','CLD','{safe_body}',1)",
             timeout=10
         )
-        return f"Note appended to {entity_name}'s {field}."
+        return f"Note added to {entity_name}'s record: \"{subject}\""
 
     else:  # pet
-        table = 'Pets'
-        pk    = 'PtSeq'
-        # Verify pet exists
         check = _run_query(
-            f"SELECT PtPetName FROM {table} WHERE {pk} = {eid} "
-            f"AND (PtDeleted IS NULL OR PtDeleted = 0)",
+            f"SELECT PtPetName FROM Pets WHERE PtSeq={eid} "
+            f"AND (PtDeleted IS NULL OR PtDeleted=0)",
             timeout=10
         )
         if not check or not any(l.strip() for l in check):
             raise ValueError(f"Pet ID {eid} not found.")
         entity_name = check[0].strip()
         _run_update(
-            f"UPDATE {table} SET {field} = ISNULL({field}, '') + CHAR(13) + CHAR(10) + "
-            f"'{note_entry}' WHERE {pk} = {eid}",
+            f"INSERT INTO PetNotes (PNPetSeq,PNDate,PNSubject,PNBy,PNNotes,PNLOCSEQ) "
+            f"VALUES ({eid},GETDATE(),'{safe_subj}','CLD','{safe_body}',1)",
             timeout=10
         )
-        return f"Note appended to {entity_name}'s {field}."
+        return f"Note added to {entity_name}'s record: \"{subject}\""
 
 
 # Standard pricing table keyed by PtCat
@@ -1338,7 +1316,7 @@ TOOLS = {
     "append_note": {
         "fn": tool_append_note,
         "description": (
-            "Append a timestamped note to a client or pet record. "
+            "Add a structured note to a client or pet record (writes to ClientNotes/PetNotes table). "
             "ALWAYS confirm with the user before calling — show exactly what will be written and where."
         ),
         "inputSchema": {
@@ -1353,20 +1331,16 @@ TOOLS = {
                     "type": "integer",
                     "description": "CLSeq for clients, PtSeq for pets."
                 },
-                "field": {
+                "subject": {
                     "type": "string",
-                    "description": (
-                        "Field to append to. "
-                        "Client: CLNotes or CLWarning. "
-                        "Pet: PtNotes, PtWarning, or PtGroom."
-                    )
+                    "description": "Short subject/title for the note (max 50 chars). Optional — auto-generated from text if omitted."
                 },
                 "text": {
                     "type": "string",
                     "description": "Note text (max 500 characters)."
                 }
             },
-            "required": ["entity_type", "entity_id", "field", "text"]
+            "required": ["entity_type", "entity_id", "text"]
         }
     },
     "add_to_knowledge_base": {

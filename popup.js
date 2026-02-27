@@ -1,7 +1,8 @@
 // Default configuration
 const DEFAULT_CONFIG = {
     backendUrl: 'http://localhost:8000',
-    liveAccessUrl: 'https://dbfcm.mykcapp.com/#/grooming/appointment/'
+    liveAccessUrl: 'https://dbfcm.mykcapp.com/#/grooming/appointment/',
+    showNoteButtons: true
 };
 
 // DOM elements
@@ -134,6 +135,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     chatInput.addEventListener('keypress', (e) => { if (e.key === 'Enter') sendChatMessage(); });
     chatResetBtn.addEventListener('click', resetChat);
 
+    // Note form buttons
+    document.getElementById('note-cancel-btn').addEventListener('click', () => {
+        document.getElementById('note-form-popup').classList.add('hidden');
+    });
+    document.getElementById('note-save-btn').addEventListener('click', saveNote);
+
     // Load initial data
     await loadWaitlist();
     await loadGroomers();
@@ -184,12 +191,16 @@ async function loadConfig() {
 function loadConfigToInputs() {
     backendUrlInput.value = config.backendUrl;
     liveAccessUrlInput.value = config.liveAccessUrl;
+    const showNotesCb = document.getElementById('show-note-buttons');
+    if (showNotesCb) showNotesCb.checked = config.showNoteButtons !== false;
 }
 
 // Save configuration
 async function saveSettings() {
     config.backendUrl = backendUrlInput.value.trim();
     config.liveAccessUrl = liveAccessUrlInput.value.trim();
+    const showNotesCb = document.getElementById('show-note-buttons');
+    if (showNotesCb) config.showNoteButtons = showNotesCb.checked;
 
     try {
         await chrome.storage.sync.set({ config });
@@ -1667,6 +1678,11 @@ function renderCheckout(clients) {
 
         const hasFinancial = (client.cards && client.cards.length > 0) || hasTip || (prefDay || cadWeeks);
 
+        const checkoutNotesHtml = buildNotesStripHtml(
+            client.client_notes || [],
+            'client', client.client_id, client.client_id, client.client_name,
+            client.pets);
+
         card.innerHTML = `
             <div class="checkout-card-header">
                 <span class="checkout-card-time">${escapeHtml(client.in_time || '')}</span>
@@ -1681,8 +1697,10 @@ function renderCheckout(clients) {
                     ${cadenceHtml}
                     ${nextApptHtml}
                 </div>
+                ${checkoutNotesHtml}
             </div>`;
 
+        wireNotesStrip(card);
         container.appendChild(card);
     });
 }
@@ -1742,6 +1760,121 @@ async function loadSmsDrafts() {
         container.innerHTML = `<div class="empty-state"><p style="color:#c00">Could not reach backend: ${e.message}</p></div>`;
     }
 }
+
+// ─── Notes helpers ────────────────────────────────────────────────────────────
+
+// pets: optional array of {pet_id, name} to offer in the form dropdown
+function buildNotesStripHtml(notes, entityType, entityId, clientId, clientName, pets) {
+    // Encode options as JSON in a data attribute (CSP blocks inline onclick in MV3 extensions)
+    const opts = JSON.stringify({
+        type: entityType, id: entityId, clientId, clientName,
+        pets: (pets || []).filter(p => p.pet_id).map(p => ({id: p.pet_id, name: p.name}))
+    });
+    // Use single-quotes for the attribute so the JSON double-quotes don't break it
+    const btnAttrs = `class="add-note-btn" data-opts='${opts.replace(/'/g, '&#39;')}'`;
+    if (!notes || notes.length === 0) {
+        if (!config.showNoteButtons) return '';
+        return `<div class="client-notes-strip"><button ${btnAttrs}>✏ Add note</button></div>`;
+    }
+    const monthAbbr = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const rows = notes.slice(0, 3).map(n => {
+        let dateLabel = n.date || '';
+        try {
+            const parts = n.date.split('-');
+            dateLabel = monthAbbr[parseInt(parts[1]) - 1] + ' ' + parseInt(parts[2]);
+        } catch(e) {}
+        const subj = n.subject || n.text || '';
+        return `<div class="client-note-row">
+            <span class="client-note-date">${escapeHtml(dateLabel)}</span>
+            <span class="client-note-subject">${escapeHtml(subj.length > 60 ? subj.slice(0, 60) + '…' : subj)}</span>
+        </div>
+        <div class="client-note-full">${escapeHtml(n.text || n.subject || '')}</div>`;
+    }).join('');
+    const addBtn = config.showNoteButtons ? `<button ${btnAttrs}>✏ Add note</button>` : '';
+    return `<div class="client-notes-strip">📋 ${rows}${addBtn}</div>`;
+}
+
+// Wire event listeners onto .add-note-btn and .client-note-row inside a container element.
+// Must be called after innerHTML is set (CSP blocks inline onclick in MV3 extensions).
+function wireNotesStrip(container) {
+    container.querySelectorAll('.add-note-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            try { openNoteForm(JSON.parse(btn.dataset.opts)); } catch(e) {}
+        });
+    });
+    container.querySelectorAll('.client-note-row').forEach(row => {
+        row.addEventListener('click', () => {
+            const full = row.nextElementSibling;
+            if (full && full.classList.contains('client-note-full')) {
+                full.classList.toggle('open');
+            }
+        });
+    });
+}
+
+let _noteFormOptions = null;
+
+function openNoteForm(options) {
+    _noteFormOptions = options;
+    const form = document.getElementById('note-form-popup');
+    if (!form) return;
+    document.getElementById('note-subject-input').value = '';
+    document.getElementById('note-text-input').value = '';
+    document.getElementById('note-text-input').placeholder = 'Fact to save…';
+    const saveBtn = document.getElementById('note-save-btn');
+    saveBtn.textContent = 'Save';
+    saveBtn.disabled = false;
+    const sel = document.getElementById('note-entity-select');
+    sel.innerHTML = `<option value="client:${options.clientId}">${escapeHtml(options.clientName)} (client)</option>`;
+    (options.pets || []).forEach(p => {
+        sel.innerHTML += `<option value="pet:${p.id}">${escapeHtml(p.name)} (pet)</option>`;
+    });
+    form.classList.remove('hidden');
+    document.getElementById('note-text-input').focus();
+}
+
+async function saveNote() {
+    const form    = document.getElementById('note-form-popup');
+    const sel     = document.getElementById('note-entity-select');
+    const saveBtn = document.getElementById('note-save-btn');
+    const [type, id] = sel.value.split(':');
+    const subject = document.getElementById('note-subject-input').value.trim();
+    const notes   = document.getElementById('note-text-input').value.trim();
+
+    if (!notes) {
+        document.getElementById('note-text-input').placeholder = 'Please enter a note…';
+        document.getElementById('note-text-input').focus();
+        return;
+    }
+
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Saving…';
+
+    try {
+        // Use cached operator name — don't call getKCAppOperator() which blocks on tab injection
+        const operator = _kcappOperatorCache ? _kcappOperatorCache.name : 'Unknown';
+        const resp = await fetch(`${config.backendUrl}/api/notes/add`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ type, id: parseInt(id), subject, notes, author: operator || 'Unknown' })
+        });
+        const data = await resp.json();
+        if (data.ok) {
+            form.classList.add('hidden');
+            if (currentTab === 'sms') loadSmsDrafts();
+            else if (currentTab === 'checkout') loadCheckout();
+        } else {
+            saveBtn.textContent = 'Error — retry';
+            saveBtn.disabled = false;
+        }
+    } catch(e) {
+        saveBtn.textContent = 'Error — retry';
+        saveBtn.disabled = false;
+        console.error('[saveNote]', e);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 function updateSmsBadge(count) {
     const badge = document.getElementById('sms-badge');
@@ -1866,12 +1999,19 @@ function renderSmsDrafts(drafts) {
             }
         }
 
+        const notesStripHtml = d.dossier
+            ? buildNotesStripHtml(
+                (d.dossier.client_notes || []),
+                'client', d.client_id, d.client_id, d.client_name)
+            : '';
+
         card.innerHTML = `
             <div class="sms-card-header">
                 <span>${escapeHtml(d.client_name)}</span>
                 <span class="sms-timestamp">${escapeHtml(ts)}</span>
             </div>
             ${dossierHtml}
+            ${notesStripHtml}
             ${threadHtml}
             ${inboundHtml}
             <div class="sms-draft-label">${d.draft ? 'Draft:' : 'Compose reply:'}</div>
@@ -1909,6 +2049,7 @@ function renderSmsDrafts(drafts) {
             await dismissSmsDraft(d.draft_id, card);
         });
 
+        wireNotesStrip(card);
         container.appendChild(card);
     });
 }

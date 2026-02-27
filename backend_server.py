@@ -985,8 +985,70 @@ ORDER BY gl.GLDate, gl.GLInTime
         except Exception:
             pass
 
+    # ── Query: ClientNotes — last 10, newest first ────────────────────────
+    cn_rows = _sql_query(f"""
+SELECT TOP 10 CONVERT(varchar,CNDate,23), ISNULL(CNSubject,''), ISNULL(CNBy,''), ISNULL(CNNotes,'')
+FROM ClientNotes WHERE CNClientSeq={cid}
+ORDER BY CNDate DESC, CNSeq DESC
+""")
+    result['client_notes'] = [
+        {'date': r[0], 'subject': r[1].strip(), 'by': r[2].strip(), 'text': r[3].strip()}
+        for r in cn_rows if r and len(r) >= 4
+    ]
+
+    # ── Query: phone + inactive (needed by pending tab) ───────────────────
+    extra = _sql_query(f"SELECT ISNULL(CLPhone1,''), ISNULL(CAST(CLInactive AS varchar),'') FROM Clients WHERE CLSeq={cid}")
+    if extra and extra[0] and len(extra[0]) >= 2:
+        result['phone']    = extra[0][0].strip()
+        result['inactive'] = extra[0][1].strip() == '-1'
+    else:
+        result['phone']    = ''
+        result['inactive'] = False
+
     _cache.set(f'dossier:{cid}', result, _TTL_DOSSIER)
     return result
+
+
+def _get_pet_context(pet_id):
+    """Return pet warning/groom/notes and PetNotes rows for a given pet ID."""
+    pid = int(pet_id)
+    result = {'pet_warning': '', 'pet_groom': '', 'pet_notes': '',
+              'is_new_pet': False, 'pet_notes_rows': []}
+
+    rows = _sql_query(
+        f"SELECT ISNULL(PtWarning,''), ISNULL(PtGroom,''), ISNULL(PtNotes,''), ISNULL(PtPetName,'') "
+        f"FROM Pets WHERE PtSeq={pid}")
+    if rows and rows[0] and len(rows[0]) >= 4:
+        r = rows[0]
+        result['pet_warning'] = r[0].strip()
+        result['pet_groom']   = r[1].strip()
+        result['pet_notes']   = r[2].strip()
+        result['is_new_pet']  = ':NEW' in r[3].upper()
+
+    pn_rows = _sql_query(f"""
+SELECT TOP 10 CONVERT(varchar,PNDate,23), ISNULL(PNSubject,''), ISNULL(PNBy,''), ISNULL(PNNotes,'')
+FROM PetNotes WHERE PNPetSeq={pid}
+ORDER BY PNDate DESC, PNSeq DESC
+""")
+    result['pet_notes_rows'] = [
+        {'date': r[0], 'subject': r[1].strip(), 'by': r[2].strip(), 'text': r[3].strip()}
+        for r in pn_rows if r and len(r) >= 4
+    ]
+    return result
+
+
+# ── Author-code mapping for notes ─────────────────────────────────────────────
+_AUTHOR_CODES = {
+    'noah': 'NMH', 'noah han': 'NMH',
+    'tomoko': 'TOM', 'tomoko hirokawa': 'TOM',
+    'kumi': 'KMT', 'kumi tachikake': 'KMT',
+    'mandilyn': 'MDY', 'mandilyn yarbrough': 'MDY',
+    'elmer': 'ELM', 'elmer rivera': 'ELM',
+    'josh': 'JSH', 'josh han': 'JSH',
+}
+
+def _operator_to_code(name):
+    return _AUTHOR_CODES.get((name or '').lower().strip(), 'EXT')
 
 
 # ── Scheduling-aware draft helpers ───────────────────────────────────────────
@@ -1305,82 +1367,56 @@ def _parse_requested_date(date_str):
 def _enrich_pending_appt(appt):
     """Add DB context to a parsed appointment dict (mutates in place)."""
     client_id = appt.get('client_id')
-    pet_id = appt.get('pet_id')
+    pet_id    = appt.get('pet_id')
+
+    dossier = _sms_get_client_dossier(client_id) if client_id else {}
+    pet_ctx = _get_pet_context(pet_id) if pet_id else {}
 
     appt['db'] = {
-        'client_warning': '', 'client_notes': '', 'client_discount': '',
-        'client_inactive': False, 'phone': '',
-        'pet_warning': '', 'pet_groom': '', 'pet_notes': '',
-        'is_new_pet': False, 'is_new_client': False,
-        'history': [], 'total_appts': 0,
-        'day_groomer_load': {}, 'requested_date': '',
+        'client_warning':  dossier.get('warning') or '',
+        'client_notes':    dossier.get('client_notes', []),
+        'client_discount': '',
+        'client_inactive': dossier.get('inactive', False),
+        'phone':           dossier.get('phone', ''),
+        'is_new_client':   dossier.get('is_new_client', True),
+        'pet_warning':     pet_ctx.get('pet_warning', ''),
+        'pet_groom':       pet_ctx.get('pet_groom', ''),
+        'pet_notes':       pet_ctx.get('pet_notes', ''),
+        'is_new_pet':      pet_ctx.get('is_new_pet', False),
+        'history':         [],
+        'total_appts':     0,
+        'day_groomer_load': {},
+        'requested_date':  '',
     }
 
+    # CLInvoiceWarning — not in dossier
     if client_id:
-        rows = _sql_query(
-            f"SELECT CLWarning, CLNotes, CLInvoiceWarning, CLPhone1, CLDiscount, CLInactive "
-            f"FROM Clients WHERE CLSeq = {client_id}")
-        if rows and rows[0] and len(rows[0]) >= 6:
-            r = rows[0]
-            appt['db']['client_warning']  = (r[0] or '').strip()
-            appt['db']['client_notes']    = (r[1] or '').strip()
-            appt['db']['client_discount'] = (r[2] or '').strip()
-            appt['db']['phone']           = (r[3] or '').strip()
-            appt['db']['client_inactive'] = str(r[5] or '').strip() == '-1'
+        r = _sql_query(f"SELECT ISNULL(CLInvoiceWarning,'') FROM Clients WHERE CLSeq={client_id}")
+        if r and r[0]:
+            appt['db']['client_discount'] = r[0][0].strip()
 
+    # Per-pet appointment history with no-show status
     if pet_id:
         rows = _sql_query(
-            f"SELECT PtWarning, PtGroom, PtNotes, PtPetName "
-            f"FROM Pets WHERE PtSeq = {pet_id}")
-        if rows and rows[0] and len(rows[0]) >= 4:
-            r = rows[0]
-            appt['db']['pet_warning'] = (r[0] or '').strip()
-            appt['db']['pet_groom']   = (r[1] or '').strip()
-            appt['db']['pet_notes']   = (r[2] or '').strip()
-            appt['db']['is_new_pet']  = ':NEW' in str(r[3] or '').upper()
-
-        # Appointment history (last 12 completed)
-        rows = _sql_query(
-            f"SELECT TOP 12 CONVERT(varchar, gl.GLDate, 23), ISNULL(e.USFNAME, 'Unknown'), "
+            f"SELECT TOP 12 CONVERT(varchar,gl.GLDate,23), ISNULL(e.USFNAME,'Unknown'), "
             f"CASE WHEN gl.GLNoShow=-1 THEN 'NOSHOW' ELSE 'OK' END "
-            f"FROM GroomingLog gl LEFT JOIN Employees e ON gl.GLGroomerID = e.USSEQN "
-            f"WHERE gl.GLPetID = {pet_id} "
-            f"AND (gl.GLDeleted IS NULL OR gl.GLDeleted=0) "
-            f"AND (gl.GLWaitlist IS NULL OR gl.GLWaitlist=0) "
-            f"ORDER BY gl.GLDate DESC")
-        appt['db']['history'] = [
-            {'date': r[0], 'groomer': r[1], 'status': r[2]}
-            for r in rows if r and len(r) >= 3
-        ]
+            f"FROM GroomingLog gl LEFT JOIN Employees e ON gl.GLGroomerID=e.USSEQN "
+            f"WHERE gl.GLPetID={pet_id} AND (gl.GLDeleted IS NULL OR gl.GLDeleted=0) "
+            f"AND (gl.GLWaitlist IS NULL OR gl.GLWaitlist=0) ORDER BY gl.GLDate DESC")
+        appt['db']['history']     = [{'date': r[0], 'groomer': r[1], 'status': r[2]}
+                                      for r in rows if r and len(r) >= 3]
+        appt['db']['total_appts'] = len(appt['db']['history'])
 
-        # Total completed appointment count
-        rows = _sql_query(
-            f"SELECT COUNT(*) FROM GroomingLog "
-            f"WHERE GLPetID = {pet_id} "
-            f"AND (GLDeleted IS NULL OR GLDeleted=0) "
-            f"AND (GLWaitlist IS NULL OR GLWaitlist=0)")
-        if rows and rows[0]:
-            try:
-                appt['db']['total_appts'] = int(rows[0][0])
-            except Exception:
-                pass
-
-        appt['db']['is_new_client'] = appt['db']['total_appts'] < 1
-
-    # Day-of schedule context
+    # Day-of groomer load
     requested_date = _parse_requested_date(appt.get('date_str', ''))
     if requested_date:
         appt['db']['requested_date'] = requested_date
         rows = _sql_query(
-            f"SELECT e.USFNAME, COUNT(*) "
-            f"FROM GroomingLog gl INNER JOIN Employees e ON gl.GLGroomerID = e.USSEQN "
-            f"WHERE gl.GLDate = '{requested_date}' "
-            f"AND (gl.GLDeleted IS NULL OR gl.GLDeleted=0) "
-            f"AND (gl.GLWaitlist IS NULL OR gl.GLWaitlist=0) "
-            f"GROUP BY e.USFNAME")
-        appt['db']['day_groomer_load'] = {
-            r[0]: int(r[1]) for r in rows if r and len(r) >= 2
-        }
+            f"SELECT e.USFNAME, COUNT(*) FROM GroomingLog gl "
+            f"INNER JOIN Employees e ON gl.GLGroomerID=e.USSEQN "
+            f"WHERE gl.GLDate='{requested_date}' AND (gl.GLDeleted IS NULL OR gl.GLDeleted=0) "
+            f"AND (gl.GLWaitlist IS NULL OR gl.GLWaitlist=0) GROUP BY e.USFNAME")
+        appt['db']['day_groomer_load'] = {r[0]: int(r[1]) for r in rows if r and len(r) >= 2}
 
 
 def _build_pending_prompt(appointments):
@@ -1936,6 +1972,17 @@ class WaitlistHandler(BaseHTTPRequestHandler):
         elif parsed_path.path == '/api/sms/drafts':
             data = self.sms_get_drafts()
             self.wfile.write(json.dumps(data).encode())
+        elif parsed_path.path == '/api/client/dossier':
+            params = urllib.parse.parse_qs(parsed_path.query)
+            try:
+                client_id = int(params.get('client_id', [0])[0])
+            except (ValueError, TypeError):
+                client_id = 0
+            if not client_id:
+                self.wfile.write(json.dumps({'error': 'client_id required'}).encode())
+                return
+            dossier = _sms_get_client_dossier(client_id)
+            self.wfile.write(json.dumps(dossier).encode())
         elif parsed_path.path == '/api/checkout/today':
             data = self.get_checkout_today()
             self.wfile.write(json.dumps(data).encode())
@@ -2014,6 +2061,35 @@ class WaitlistHandler(BaseHTTPRequestHandler):
         elif parsed_path.path == '/api/appt/book':
             result = self.appt_book(data)
             self.send_json_response(result)
+        elif parsed_path.path == '/api/notes/add':
+            entity_type = data.get('type', '')
+            try:
+                entity_id = int(data.get('id', 0))
+            except (ValueError, TypeError):
+                entity_id = 0
+            subject    = (data.get('subject', '') or '')[:50].strip()
+            notes_text = (data.get('notes', '') or '').strip()
+            author     = _operator_to_code(data.get('author', ''))
+            if not entity_id or not notes_text:
+                self.send_error_response(400, 'id and notes are required')
+                return
+            if not subject:
+                subject = notes_text[:47].rstrip() + ('…' if len(notes_text) > 47 else '')
+            safe_subj  = subject.replace("'", "''")
+            safe_notes = notes_text.replace("'", "''")
+            if entity_type == 'client':
+                _sql_query(f"INSERT INTO ClientNotes "
+                           f"(CNClientSeq,CNDate,CNSubject,CNBy,CNNotes,CNLOCSEQ) "
+                           f"VALUES ({entity_id},GETDATE(),'{safe_subj}','{author}','{safe_notes}',1)")
+                _cache.delete(f'dossier:{entity_id}')
+            elif entity_type == 'pet':
+                _sql_query(f"INSERT INTO PetNotes "
+                           f"(PNPetSeq,PNDate,PNSubject,PNBy,PNNotes,PNLOCSEQ) "
+                           f"VALUES ({entity_id},GETDATE(),'{safe_subj}','{author}','{safe_notes}',1)")
+            else:
+                self.send_error_response(400, 'type must be client or pet')
+                return
+            self.send_json_response({'ok': True})
         elif parsed_path.path == '/api/pending/analyze':
             result = self.analyze_pending_appointments(data.get('html', ''))
             self.send_json_response(result)
@@ -2943,7 +3019,8 @@ SELECT
                         AND bt.BTDate = gl2.GLDate))
             )
         ) THEN '1' ELSE '0' END AS HasConflict,
-    ISNULL(CAST(gl.GLCompleted AS varchar), '0') AS Completed
+    ISNULL(CAST(gl.GLCompleted AS varchar), '0') AS Completed,
+    CAST(p.PtSeq AS varchar) AS PetSeq
 FROM GroomingLog gl
 INNER JOIN Pets p ON gl.GLPetID = p.PtSeq
 INNER JOIN Clients c ON p.PtOwnerCode = c.CLSeq
@@ -2976,6 +3053,7 @@ ORDER BY gl.GLInTime, c.CLSeq
              tip_method, preferred_day, avg_cadence_days,
              next_appt, future_appt_count, has_conflict,
              completed) = row[:23] if len(row) >= 23 else (row + [''] * 23)[:23]
+            pet_id = row[23] if len(row) > 23 else ''
 
             if client_id not in clients:
                 # Build cards list (only non-empty masks)
@@ -3000,6 +3078,15 @@ ORDER BY gl.GLInTime, c.CLSeq
                 if future_count == 0:
                     suggested = _suggest_next_date(cadence_val, pref_day_val)
 
+                cid = client_id
+                cn_rows = _sql_query(
+                    f"SELECT TOP 3 CONVERT(varchar,CNDate,23), ISNULL(CNSubject,''), ISNULL(CNNotes,'') "
+                    f"FROM ClientNotes WHERE CNClientSeq={cid} ORDER BY CNDate DESC, CNSeq DESC")
+                client_notes = [
+                    {'date': r[0], 'subject': r[1].strip(), 'text': r[2].strip()}
+                    for r in cn_rows if r and len(r) >= 3
+                ]
+
                 clients[client_id] = {
                     'client_id':        client_id,
                     'client_name':      client_name,
@@ -3017,10 +3104,12 @@ ORDER BY gl.GLInTime, c.CLSeq
                     'future_appt_count': future_count,
                     'has_conflict':     has_conflict == '1',
                     'suggested_next':   suggested,
+                    'client_notes':     client_notes,
                 }
 
             clients[client_id]['pets'].append({
                 'name':    pet_name,
+                'pet_id':  pet_id,
                 'groomer': groomer if groomer else None,
                 'done':    completed == '-1',
             })

@@ -2141,3 +2141,70 @@ body {
     color: #555;
 }
 
+/* ── Client notes strip ──────────────────────────────────────────────── */
+.client-notes-strip {
+    padding: 3px 12px 5px;
+    border-top: 1px solid #eee;
+    font-size: 10.5px;
+    color: #555;
+}
+.client-note-row {
+    display: flex;
+    gap: 6px;
+    align-items: baseline;
+    padding: 1px 0;
+    cursor: pointer;
+}
+.client-note-row:hover { background: #f7f7f7; }
+.client-note-date { color: #999; white-space: nowrap; min-width: 44px; }
+.client-note-subject { color: #444; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.client-note-full { color: #666; font-size: 10px; padding: 2px 0 2px 50px; display: none; }
+.client-note-full.open { display: block; }
+.add-note-btn {
+    font-size: 10px;
+    background: none;
+    border: 1px solid #ccc;
+    border-radius: 3px;
+    padding: 1px 7px;
+    cursor: pointer;
+    color: #666;
+    margin: 3px 0 0;
+    display: inline-block;
+}
+.add-note-btn:hover { background: #f0f0f0; }
+
+/* ── Floating note form ──────────────────────────────────────────────── */
+.note-form-popup {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background: #fff;
+    border: 1px solid #ccc;
+    border-radius: 8px;
+    box-shadow: 0 4px 16px rgba(0,0,0,.18);
+    width: 300px;
+    z-index: 999;
+}
+.note-form-inner {
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+}
+.note-form-inner select,
+.note-form-inner input,
+.note-form-inner textarea {
+    font-size: 12px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    padding: 4px 6px;
+    font-family: inherit;
+}
+.note-form-inner textarea { resize: vertical; }
+.note-form-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
+}
+
