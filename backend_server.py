@@ -54,6 +54,8 @@ def _load_machine_config():
         'sql_auth':        'sql',
         'sql_user':        'noah',
         'sql_password':    'noah',
+        'noah_phone_numbers': ['5106465763', '5103310678'],
+        'noah_cell_primary':  '5106465763',
     }
     # Try hostname-specific file first, then generic fallback
     candidates = [
@@ -427,8 +429,8 @@ _cache = _TTLCache()
 
 # ── Noah's personal cell numbers (for inbound routing) ───────────────────────
 # Texts from these numbers go to KB ingestion, not the staff SMS queue.
-NOAH_PHONE_NUMBERS = {'5106465763', '5103310678'}
-NOAH_CELL_PRIMARY  = '5106465763'  # used for outbound escalation drafts
+NOAH_PHONE_NUMBERS = set(_cfg['noah_phone_numbers'])
+NOAH_CELL_PRIMARY  = _cfg['noah_cell_primary']  # used for outbound escalation drafts
 
 def _normalize_phone(phone: str) -> str:
     """Strip all non-digit characters; strip leading '1' country code for US numbers."""

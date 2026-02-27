@@ -8,7 +8,10 @@
 
   "sql_auth": "sql",
   "sql_user": "noah",
-  "sql_password": "noah"
+  "sql_password": "noah",
+
+  "noah_phone_numbers": ["5106465763", "5103310678"],
+  "noah_cell_primary":  "5106465763"
 
   // For Windows Authentication (front desk machine), use:
   // "sql_auth": "windows"
