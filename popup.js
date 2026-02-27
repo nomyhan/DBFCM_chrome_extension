@@ -145,9 +145,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     await loadWaitlist();
     await loadGroomers();
 
-    // Detect KCApp operator for Know-a-bot (non-blocking)
-    getKCAppOperator();
-
     // Check backend status periodically
     setInterval(updateBackendStatusIndicator, 10000);
 });
@@ -170,8 +167,6 @@ function switchTab(tab) {
     if (tab === 'sms') loadSmsDrafts();
     // Auto-load Checkout tab when switched to
     if (tab === 'checkout') loadCheckout();
-    // Refresh operator detection when switching to chat tab
-    if (tab === 'chat') getKCAppOperator();
 }
 
 // Load configuration from storage
@@ -1331,113 +1326,6 @@ function appendChatBubble(role, text) {
     return bubble;
 }
 
-// ── KCApp operator detection ──────────────────────────────────────────────────
-// Cache: { name, fetchedAt } — refreshed every 5 minutes
-let _kcappOperatorCache = null;
-
-async function getKCAppOperator() {
-    const CACHE_MS = 5 * 60 * 1000;
-    if (_kcappOperatorCache && (Date.now() - _kcappOperatorCache.fetchedAt) < CACHE_MS) {
-        return _kcappOperatorCache.name;
-    }
-
-    let name = 'Unknown';
-    try {
-        const tabs = await chrome.tabs.query({ url: 'https://dbfcm.mykcapp.com/*' });
-        if (tabs.length) {
-            const [injection] = await chrome.scripting.executeScript({
-                target: { tabId: tabs[0].id },
-                world: 'MAIN',
-                func: async () => {
-                    // Approach 1: try KCApp's session endpoint
-                    try {
-                        const r = await fetch('/api/user/current', { credentials: 'include' });
-                        if (r.ok) {
-                            const d = await r.json();
-                            const n = d?.FullName || d?.Name || d?.UserName || d?.ReturnedObject?.FullName;
-                            if (n) return n;
-                        }
-                    } catch (_) {}
-
-                    // Approach 2: try /Account/GetCurrentUser (KC7 MVC pattern)
-                    try {
-                        const r = await fetch('/Account/GetCurrentUser', { credentials: 'include' });
-                        if (r.ok) {
-                            const d = await r.json();
-                            const n = d?.FullName || d?.Name || d?.ReturnedObject?.FullName;
-                            if (n) return n;
-                        }
-                    } catch (_) {}
-
-                    // Approach 3: read from DOM — KC7 nav bar typically shows employee name
-                    const selectors = [
-                        '.navbar-right .username',
-                        '.navbar .user-fullname',
-                        '.nav-user-name',
-                        '#user-display-name',
-                        '.current-user',
-                        '[data-user-name]',
-                        '.navbar-right a.dropdown-toggle',
-                        '.user-info .name',
-                        '.header-user',
-                        '#loggedInUser',
-                        '.logged-in-as',
-                        'li.dropdown > a[data-toggle="dropdown"]',
-                    ];
-                    for (const sel of selectors) {
-                        const el = document.querySelector(sel);
-                        if (el) {
-                            const txt = (el.dataset.userName || el.textContent || '').trim()
-                                .replace(/\s+/g, ' ');
-                            // Reject generic labels like "Account", "Menu", "Admin"
-                            if (txt && txt.length > 2 && txt.length < 60
-                                    && !['account','menu','admin','home','logout'].includes(txt.toLowerCase())) {
-                                return txt;
-                            }
-                        }
-                    }
-
-                    // Approach 4: check window globals that KC7 may expose
-                    const globals = ['currentUser', 'loggedInUser', 'employeeInfo', 'userInfo', 'AppUser'];
-                    for (const g of globals) {
-                        const v = window[g];
-                        if (v) {
-                            const n = (typeof v === 'string') ? v
-                                : (v.FullName || v.Name || v.UserName || v.name || '');
-                            if (n && n.length > 1) return n;
-                        }
-                    }
-
-                    return null;
-                }
-            });
-            if (injection?.result) name = injection.result;
-        }
-    } catch (e) {
-        console.warn('[Know-a-bot] Could not detect KCApp operator:', e.message);
-    }
-
-    _kcappOperatorCache = { name, fetchedAt: Date.now() };
-    updateOperatorBar(name);
-    return name;
-}
-
-function updateOperatorBar(name) {
-    const bar = document.getElementById('chat-operator-bar');
-    const label = document.getElementById('chat-operator-label');
-    if (!bar || !label) return;
-    bar.classList.remove('operator-noah', 'operator-unknown');
-    if (name === 'Unknown') {
-        label.textContent = 'Logged in as: Unknown (open KCApp to identify)';
-        bar.classList.add('operator-unknown');
-    } else if (name.toLowerCase().includes('noah') || name.toLowerCase().includes('han')) {
-        label.textContent = `Logged in as: ${name} (owner — full access)`;
-        bar.classList.add('operator-noah');
-    } else {
-        label.textContent = `Logged in as: ${name}`;
-    }
-}
-
 async function sendChatMessage() {
     const message = chatInput.value.trim();
     if (!message) return;
@@ -1449,14 +1337,11 @@ async function sendChatMessage() {
 
     const thinkingBubble = appendChatBubble('thinking', 'Know-a-bot is thinking…');
 
-    // Detect operator — run concurrently with the thinking display
-    const operator_name = await getKCAppOperator();
-
     try {
         const response = await fetch(`${config.backendUrl}/api/chat`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ message, operator_name }),
+            body: JSON.stringify({ message }),
             signal: AbortSignal.timeout(300000)  // 5 min — Claude CLI can be slow on first call
         });
 
@@ -1851,12 +1736,10 @@ async function saveNote() {
     saveBtn.textContent = 'Saving…';
 
     try {
-        // Use cached operator name — don't call getKCAppOperator() which blocks on tab injection
-        const operator = _kcappOperatorCache ? _kcappOperatorCache.name : 'Unknown';
         const resp = await fetch(`${config.backendUrl}/api/notes/add`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ type, id: parseInt(id), subject, notes, author: operator || 'Unknown' })
+            body: JSON.stringify({ type, id: parseInt(id), subject, notes, author: 'EXT' })
         });
         const data = await resp.json();
         if (data.ok) {

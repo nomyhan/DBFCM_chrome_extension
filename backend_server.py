@@ -195,19 +195,7 @@ def build_noahbot_system_prompt():
         "The message must: (1) describe in plain language exactly what you are about to do, "
         "(2) explain the real-world consequence in simple terms (e.g. 'This will add a real appointment "
         "to the live system that the client and groomers will see'), and (3) ask the user to confirm "
-        "before you proceed. Do not call the tool until you receive explicit confirmation.\n\n"
-        "OPERATOR CONTEXT: Each message you receive will start with a line like [Operator: Name]. "
-        "This tells you who is currently using Know-a-bot. Noah is the owner and has full access. "
-        "Staff members (Tomoko, Kumi, Mandilyn, Elmer, Josh) can also make changes. "
-        "Unknown means the KCApp login could not be read — this is a detection issue, not a ban.\n\n"
-        "AUTHORIZATION RULES:\n"
-        "- Noah: full access. No extra confirmation beyond the standard confirmation rule.\n"
-        "- Named staff (Tomoko, Kumi, Mandilyn, Elmer, Josh): full access to read and write. "
-        "Follow the standard CONFIRMATION RULE before any write tool.\n"
-        "- Unknown operator: proceed normally for read queries. For write operations, add one extra "
-        "sentence in your confirmation: 'Note: I could not detect your KCApp login — please make sure "
-        "you are logged in, or let me know your name.' Then proceed if they confirm. "
-        "Do NOT refuse or hard-block — Unknown just means the login detection did not work.\n\n---\n\n"
+        "before you proceed. Do not call the tool until you receive explicit confirmation.\n\n---\n\n"
     )
 
     for filename in doc_files:
@@ -2028,8 +2016,7 @@ class WaitlistHandler(BaseHTTPRequestHandler):
             if not message:
                 self.send_json_response({'success': False, 'error': 'Message is required'})
                 return
-            operator_name = data.get('operator_name', 'Unknown').strip() or 'Unknown'
-            result = self.get_chat_response(message, operator_name)
+            result = self.get_chat_response(message)
             self.send_json_response(result)
         elif parsed_path.path == '/api/chat/reset':
             result = self.reset_chat()
@@ -2891,7 +2878,7 @@ class WaitlistHandler(BaseHTTPRequestHandler):
         except Exception as e:
             return {'success': False, 'error': str(e)}
 
-    def get_chat_response(self, message, operator_name='Unknown'):
+    def get_chat_response(self, message):
         """Send a message to Claude CLI via direct subprocess (no shell — avoids all quoting issues)."""
         global _claude_session_id, _system_prompt_file
 
@@ -2910,14 +2897,11 @@ class WaitlistHandler(BaseHTTPRequestHandler):
         else:
             session_args = ['--resume', _claude_session_id]
 
-        # Prepend operator identity so Know-a-bot always knows who's typing.
-        full_message = f"[Operator: {operator_name}]\n{message}"
-
         cmd = base + session_args + [
             '--mcp-config', MCP_CONFIG_WSL_PATH,
             '--allowedTools', MCP_ALLOWED_TOOLS,
             '--output-format', 'json',
-            full_message,
+            message,
         ]
 
         session_label = 'new' if _claude_session_id is None else _claude_session_id[:8] + '...'

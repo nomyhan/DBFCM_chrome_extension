@@ -1251,29 +1251,6 @@ body {
 
 /* ===== Noah-bot Chat Tab ===== */
 
-.chat-operator-bar {
-    display: flex;
-    align-items: center;
-    padding: 4px 12px;
-    background: #f7f7f7;
-    border-bottom: 1px solid #e0e0e0;
-    flex-shrink: 0;
-    font-size: 11px;
-    color: #666;
-}
-
-.chat-operator-bar.operator-noah {
-    background: #eef3ff;
-    color: #3a4db7;
-    border-bottom-color: #c8d4f5;
-}
-
-.chat-operator-bar.operator-unknown {
-    background: #fff8e1;
-    color: #8a6a00;
-    border-bottom-color: #f0d87a;
-}
-
 .chat-input-bar {
     display: flex;
     gap: 6px;
