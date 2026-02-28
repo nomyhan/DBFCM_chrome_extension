@@ -26,6 +26,9 @@ import logging
 import time
 import uuid
 
+import db_utils
+from db_utils import run_query_rows, normalize_phone, author_code, configure_from_config
+
 # Detect whether we're running on Windows or WSL/Linux
 IS_WINDOWS = platform.system() == 'Windows'
 
@@ -76,11 +79,8 @@ def _load_machine_config():
     return defaults
 
 _cfg = _load_machine_config()
+configure_from_config(_cfg)
 WSL_CLAUDE_PATH = _cfg['wsl_claude_path']
-if _cfg['sql_auth'] == 'windows':
-    SQL_AUTH_ARGS = ['-E']
-else:
-    SQL_AUTH_ARGS = ['-U', _cfg['sql_user'], '-P', _cfg['sql_password']]
 
 # MCP config path — written dynamically by _generate_mcp_config() at startup
 MCP_CONFIG_WSL_PATH = None
@@ -353,10 +353,6 @@ def _shell_run(cmd: str):
                 lines.append(decoded)
     return '\n'.join(lines), exit_code
 
-# SQL Server connection settings (from config.local.json or defaults)
-SQL_SERVER   = _cfg['sql_server']
-SQL_DATABASE = _cfg['sql_database']
-
 # ── SMS Draft+Approve state ──────────────────────────────────────────────────
 # Drafts keyed by str(inbound MessageId): {draft_id, message_id, client_id,
 # client_name, phone, their_message, draft, timestamp}
@@ -420,16 +416,9 @@ _cache = _TTLCache()
 NOAH_PHONE_NUMBERS = set(_cfg['noah_phone_numbers'])
 NOAH_CELL_PRIMARY  = _cfg['noah_cell_primary']  # used for outbound escalation drafts
 
-def _normalize_phone(phone: str) -> str:
-    """Strip all non-digit characters; strip leading '1' country code for US numbers."""
-    digits = re.sub(r'\D', '', phone or '')
-    if len(digits) == 11 and digits.startswith('1'):
-        digits = digits[1:]
-    return digits
-
 def _is_noah_phone(phone: str) -> bool:
     """Return True if the phone number belongs to Noah's personal cell."""
-    return _normalize_phone(phone) in NOAH_PHONE_NUMBERS
+    return normalize_phone(phone) in NOAH_PHONE_NUMBERS
 
 # ── Sent escalations tracking ─────────────────────────────────────────────────
 # Tracks escalations sent to Noah so we can match his reply to the original question.
@@ -496,32 +485,9 @@ def _load_sms_drafts():
     except Exception as e:
         log.warning(f'[SMS] Could not load saved drafts: {e}')
 
-def _sql_query(query):
-    """Run a sqlcmd query and return rows as list of stripped-field lists."""
-    cmd = ['sqlcmd', '-S', SQL_SERVER, '-d', SQL_DATABASE, *SQL_AUTH_ARGS,
-           '-Q', f'SET NOCOUNT ON; {query}', '-W', '-h', '-1', '-s', '\t']
-    try:
-        # Use utf-8 with errors='replace' so special characters (e.g. accented
-        # letters in client/pet names) don't crash with cp1252 UnicodeDecodeError.
-        result = subprocess.run(cmd, capture_output=True,
-                                encoding='utf-8', errors='replace', timeout=30)
-    except Exception:
-        return []
-    if result.returncode != 0:
-        return []
-    if not result.stdout:
-        return []
-    rows = []
-    for line in result.stdout.strip().split('\n'):
-        line = line.strip()
-        if not line or line.startswith('--'):
-            continue
-        rows.append([c.strip() for c in line.split('\t')])
-    return rows
-
 def _ensure_audit_tables():
     """Create AgentAuditLog and AgentRunLog if they don't exist. Safe to run every startup."""
-    _sql_query(
+    run_query_rows(
         "IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name='AgentAuditLog') "
         "CREATE TABLE AgentAuditLog ("
         "  AuditSeq INT IDENTITY(1,1) PRIMARY KEY, "
@@ -533,7 +499,7 @@ def _ensure_audit_tables():
         "  VerifiedAt DATETIME, ErrorMessage VARCHAR(1000), SessionId VARCHAR(100)"
         ")"
     )
-    _sql_query(
+    run_query_rows(
         "IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name='AgentRunLog') "
         "CREATE TABLE AgentRunLog ("
         "  RunSeq INT IDENTITY(1,1) PRIMARY KEY, "
@@ -599,26 +565,26 @@ def _sms_send_via_kcapp(phone, message, client_id, cookies_dict):
 
 def _sms_attribute_to_claude(message_id):
     """Set SendFromEmployeeId=105 (Claude Code) on a newly-sent SMS."""
-    _sql_query(f"UPDATE SMSMessages SET SendFromEmployeeId=105 "
+    run_query_rows(f"UPDATE SMSMessages SET SendFromEmployeeId=105 "
                f"WHERE MessageId={int(message_id)}")
 
 def _sms_mark_handled(message_id):
     """Mark an inbound message as handled."""
-    _sql_query(f"UPDATE SMSMessages SET IsHandled=1, MarkedHandledEmployeeId=105 "
+    run_query_rows(f"UPDATE SMSMessages SET IsHandled=1, MarkedHandledEmployeeId=105 "
                f"WHERE MessageId={int(message_id)}")
 
 def _sms_get_client_context(client_id):
     """Return dict with client name, pets, upcoming appts, and recent conversation."""
     cid = int(client_id)
 
-    client_rows = _sql_query(
+    client_rows = run_query_rows(
         f"SELECT CLFirstName, CLLastName FROM Clients WHERE CLSeq={cid}")
     if not client_rows or len(client_rows[0]) < 2:
         return None
     first_name = client_rows[0][0]
     last_name  = client_rows[0][1]
 
-    pet_rows = _sql_query(
+    pet_rows = run_query_rows(
         f"SELECT p.PtPetName, ISNULL(b.BrBreed,'') "
         f"FROM Pets p LEFT JOIN Breeds b ON p.PtBreedID=b.BrSeq "
         f"WHERE p.PtOwnerCode={cid} AND (p.PtDeleted IS NULL OR p.PtDeleted=0) "
@@ -626,7 +592,7 @@ def _sms_get_client_context(client_id):
         f"AND (p.PtDeceased IS NULL OR p.PtDeceased=0)")
     pets = [f"{r[0]} ({r[1]})" if len(r) > 1 and r[1] else r[0] for r in pet_rows]
 
-    appt_rows = _sql_query(
+    appt_rows = run_query_rows(
         f"SELECT TOP 5 "
         f"CONVERT(VARCHAR(10),gl.GLDate,120), "
         f"REPLACE(CONVERT(VARCHAR(5),DATEADD(MINUTE,DATEDIFF(MINUTE,'1899-12-30',gl.GLInTime),0),108),'1899-12-30 ',''), "
@@ -647,7 +613,7 @@ def _sms_get_client_context(client_id):
         if len(r) >= 5:
             appts.append(f"{r[0]} at {r[1]}: {r[2]} ({r[3]}, {r[4]})")
 
-    conv_rows = _sql_query(
+    conv_rows = run_query_rows(
         f"SELECT TOP 10 "
         f"CASE WHEN IsSendSMSByBusiness=1 THEN 'Us' ELSE 'Client' END, "
         f"LEFT(Message,120) "
@@ -713,7 +679,7 @@ def _sms_get_client_dossier(client_id):
     }
 
     # ── Query 1: client stats + future appt count ─────────────────────────
-    hdr = _sql_query(f"""
+    hdr = run_query_rows(f"""
 SELECT
     ISNULL(c.CLWarning,''),
     ISNULL(CAST(s.AvgCadenceDays AS varchar),''),
@@ -755,7 +721,7 @@ WHERE c.CLSeq={cid}
             result['is_new_client'] = True
 
     # ── Query 2: pets + per-pet last groom date + birthdate ──────────────
-    pet_rows = _sql_query(f"""
+    pet_rows = run_query_rows(f"""
 SELECT
     CAST(p.PtSeq AS varchar),
     p.PtPetName,
@@ -837,7 +803,7 @@ ORDER BY p.PtPetName
     total_appts = 0
     if pet_ids:
         pid_list = ','.join(pid for pid in pet_ids)
-        hist = _sql_query(f"""
+        hist = run_query_rows(f"""
 SELECT TOP 40
     CAST(gl.GLPetID AS varchar),
     ISNULL(CAST(gl.GLBath AS varchar),'0'),
@@ -935,7 +901,7 @@ ORDER BY gl.GLDate DESC
             result['last_visit'] = most_recent
 
     # ── Next scheduled appointment ─────────────────────────────────────────
-    na = _sql_query(f"""
+    na = run_query_rows(f"""
 SELECT TOP 1 CONVERT(VARCHAR(10),gl.GLDate,120), p.PtPetName, ISNULL(e.USFNAME,'')
 FROM GroomingLog gl
 INNER JOIN Pets p ON gl.GLPetID=p.PtSeq
@@ -974,7 +940,7 @@ ORDER BY gl.GLDate, gl.GLInTime
             pass
 
     # ── Query: ClientNotes — last 10, newest first ────────────────────────
-    cn_rows = _sql_query(f"""
+    cn_rows = run_query_rows(f"""
 SELECT TOP 10 CONVERT(varchar,CNDate,23), ISNULL(CNSubject,''), ISNULL(CNBy,''), ISNULL(CNNotes,'')
 FROM ClientNotes WHERE CNClientSeq={cid}
 ORDER BY CNDate DESC, CNSeq DESC
@@ -985,7 +951,7 @@ ORDER BY CNDate DESC, CNSeq DESC
     ]
 
     # ── Query: phone + inactive (needed by pending tab) ───────────────────
-    extra = _sql_query(f"SELECT ISNULL(CLPhone1,''), ISNULL(CAST(CLInactive AS varchar),'') FROM Clients WHERE CLSeq={cid}")
+    extra = run_query_rows(f"SELECT ISNULL(CLPhone1,''), ISNULL(CAST(CLInactive AS varchar),'') FROM Clients WHERE CLSeq={cid}")
     if extra and extra[0] and len(extra[0]) >= 2:
         result['phone']    = extra[0][0].strip()
         result['inactive'] = extra[0][1].strip() == '-1'
@@ -1003,7 +969,7 @@ def _get_pet_context(pet_id):
     result = {'pet_warning': '', 'pet_groom': '', 'pet_notes': '',
               'is_new_pet': False, 'pet_notes_rows': []}
 
-    rows = _sql_query(
+    rows = run_query_rows(
         f"SELECT ISNULL(PtWarning,''), ISNULL(PtGroom,''), ISNULL(PtNotes,''), ISNULL(PtPetName,'') "
         f"FROM Pets WHERE PtSeq={pid}")
     if rows and rows[0] and len(rows[0]) >= 4:
@@ -1013,7 +979,7 @@ def _get_pet_context(pet_id):
         result['pet_notes']   = r[2].strip()
         result['is_new_pet']  = ':NEW' in r[3].upper()
 
-    pn_rows = _sql_query(f"""
+    pn_rows = run_query_rows(f"""
 SELECT TOP 10 CONVERT(varchar,PNDate,23), ISNULL(PNSubject,''), ISNULL(PNBy,''), ISNULL(PNNotes,'')
 FROM PetNotes WHERE PNPetSeq={pid}
 ORDER BY PNDate DESC, PNSeq DESC
@@ -1023,20 +989,6 @@ ORDER BY PNDate DESC, PNSeq DESC
         for r in pn_rows if r and len(r) >= 4
     ]
     return result
-
-
-# ── Author-code mapping for notes ─────────────────────────────────────────────
-_AUTHOR_CODES = {
-    'noah': 'NMH', 'noah han': 'NMH',
-    'tomoko': 'TOM', 'tomoko hirokawa': 'TOM',
-    'kumi': 'KMT', 'kumi tachikake': 'KMT',
-    'mandilyn': 'MDY', 'mandilyn yarbrough': 'MDY',
-    'elmer': 'ELM', 'elmer rivera': 'ELM',
-    'josh': 'JSH', 'josh han': 'JSH',
-}
-
-def _operator_to_code(name):
-    return _AUTHOR_CODES.get((name or '').lower().strip(), 'EXT')
 
 
 # ── Scheduling-aware draft helpers ───────────────────────────────────────────
@@ -1070,7 +1022,7 @@ def _get_holidays(start_date_str, days=45):
     cached = _cache.get(key)
     if cached is not None:
         return cached
-    rows = _sql_query(
+    rows = run_query_rows(
         f"SELECT CONVERT(VARCHAR(10), Date, 120) FROM Calendar "
         f"WHERE Date BETWEEN '{start_date_str}' "
         f"AND DATEADD(day,{days},'{start_date_str}') "
@@ -1113,7 +1065,7 @@ def _sms_get_compact_availability():
     hols = _get_holidays(today_s, 45)
 
     # LIMIT-blocked dates
-    limits = {r[0] for r in _sql_query(
+    limits = {r[0] for r in run_query_rows(
         f"SELECT DISTINCT CONVERT(VARCHAR(10),GLDate,120) FROM GroomingLog "
         f"WHERE GLPetID=12120 AND GLDate>'{today_s}' AND GLDate<='{end_s}' "
         f"AND (GLDeleted IS NULL OR GLDeleted=0)") if r}
@@ -1122,7 +1074,7 @@ def _sms_get_compact_availability():
     # A standard slot is blocked if any existing appointment overlaps it —
     # i.e. appt_start <= slot_start < appt_end.
     taken = set()
-    appt_rows = _sql_query(
+    appt_rows = run_query_rows(
         f"SELECT GLGroomerID, CONVERT(VARCHAR(10),GLDate,120), "
         f"CONVERT(VARCHAR(5),DATEADD(MINUTE,DATEDIFF(MINUTE,'1899-12-30',GLInTime),0),108), "
         f"CONVERT(VARCHAR(5),DATEADD(MINUTE,DATEDIFF(MINUTE,'1899-12-30',GLOutTime),0),108) "
@@ -1151,7 +1103,7 @@ def _sms_get_compact_availability():
     def working_days_for(gid):
         """Return set of date-strings when this groomer is scheduled."""
         working = set()
-        for r in _sql_query(
+        for r in run_query_rows(
                 f"SELECT CONVERT(VARCHAR(10),GroomerSchWEDate,120),"
                 f"GroomerSchtueIn,GroomerSchwedIn,GroomerSchthurIn,"
                 f"GroomerSchfriIn,GroomerSchsatIn "
@@ -1215,7 +1167,7 @@ def _sms_lookup_client(name_query):
     q = name_query.strip().replace("'", "").replace('"', '')  # sanitize quotes
     if q.lower().startswith('pet:'):
         pet = q[4:].strip()
-        rows = _sql_query(
+        rows = run_query_rows(
             f"SELECT TOP 1 c.CLSeq, c.CLFirstName, c.CLLastName, c.CLPhone1 "
             f"FROM Clients c INNER JOIN Pets p ON p.PtOwnerCode=c.CLSeq "
             f"WHERE p.PtPetName LIKE '%{pet}%' "
@@ -1225,12 +1177,12 @@ def _sms_lookup_client(name_query):
         parts = q.split()
         if len(parts) >= 2:
             fname, lname = parts[0], parts[-1]
-            rows = _sql_query(
+            rows = run_query_rows(
                 f"SELECT TOP 1 CLSeq, CLFirstName, CLLastName, CLPhone1 FROM Clients "
                 f"WHERE CLFirstName LIKE '%{fname}%' AND CLLastName LIKE '%{lname}%' "
                 f"AND (CLDeleted IS NULL OR CLDeleted=0)")
         else:
-            rows = _sql_query(
+            rows = run_query_rows(
                 f"SELECT TOP 1 CLSeq, CLFirstName, CLLastName, CLPhone1 FROM Clients "
                 f"WHERE (CLFirstName LIKE '%{q}%' OR CLLastName LIKE '%{q}%') "
                 f"AND (CLDeleted IS NULL OR CLDeleted=0)")
@@ -1379,13 +1331,13 @@ def _enrich_pending_appt(appt):
 
     # CLInvoiceWarning — not in dossier
     if client_id:
-        r = _sql_query(f"SELECT ISNULL(CLInvoiceWarning,'') FROM Clients WHERE CLSeq={client_id}")
+        r = run_query_rows(f"SELECT ISNULL(CLInvoiceWarning,'') FROM Clients WHERE CLSeq={client_id}")
         if r and r[0]:
             appt['db']['client_discount'] = r[0][0].strip()
 
     # Per-pet appointment history with no-show status
     if pet_id:
-        rows = _sql_query(
+        rows = run_query_rows(
             f"SELECT TOP 12 CONVERT(varchar,gl.GLDate,23), ISNULL(e.USFNAME,'Unknown'), "
             f"CASE WHEN gl.GLNoShow=-1 THEN 'NOSHOW' ELSE 'OK' END "
             f"FROM GroomingLog gl LEFT JOIN Employees e ON gl.GLGroomerID=e.USSEQN "
@@ -1399,7 +1351,7 @@ def _enrich_pending_appt(appt):
     requested_date = _parse_requested_date(appt.get('date_str', ''))
     if requested_date:
         appt['db']['requested_date'] = requested_date
-        rows = _sql_query(
+        rows = run_query_rows(
             f"SELECT e.USFNAME, COUNT(*) FROM GroomingLog gl "
             f"INNER JOIN Employees e ON gl.GLGroomerID=e.USSEQN "
             f"WHERE gl.GLDate='{requested_date}' AND (gl.GLDeleted IS NULL OR gl.GLDeleted=0) "
@@ -1837,7 +1789,7 @@ def _sms_poll_inbound():
 
     # On first run, just set the watermark — don't retroactively draft old messages
     if _sms_last_seen_id == 0:
-        rows = _sql_query("SELECT ISNULL(MAX(MessageId),0) FROM SMSMessages")
+        rows = run_query_rows("SELECT ISNULL(MAX(MessageId),0) FROM SMSMessages")
         if rows and rows[0]:
             try:
                 _sms_last_seen_id = int(rows[0][0])
@@ -1846,7 +1798,7 @@ def _sms_poll_inbound():
         print(f"[SMS] Poller initialized, watermark MessageId={_sms_last_seen_id}")
         return
 
-    rows = _sql_query(
+    rows = run_query_rows(
         f"SELECT TOP 20 MessageId, ClientId, Phone, Message, "
         f"CONVERT(VARCHAR(19),TimeReceivedOrSent,120) "
         f"FROM SMSMessages "
@@ -2033,6 +1985,9 @@ class WaitlistHandler(BaseHTTPRequestHandler):
         elif parsed_path.path == '/api/sms/regen':
             result = self.sms_regen_draft(data)
             self.send_json_response(result)
+        elif parsed_path.path == '/api/sms/send':
+            result = self.sms_send_via_kc(data)
+            self.send_json_response(result)
         elif parsed_path.path == '/api/sms/queue-outbound':
             result = self.sms_queue_outbound(data)
             self.send_json_response(result)
@@ -2056,7 +2011,7 @@ class WaitlistHandler(BaseHTTPRequestHandler):
                 entity_id = 0
             subject    = (data.get('subject', '') or '')[:50].strip()
             notes_text = (data.get('notes', '') or '').strip()
-            author     = _operator_to_code(data.get('author', ''))
+            author     = author_code(data.get('author', ''))
             if not entity_id or not notes_text:
                 self.send_error_response(400, 'id and notes are required')
                 return
@@ -2065,12 +2020,12 @@ class WaitlistHandler(BaseHTTPRequestHandler):
             safe_subj  = subject.replace("'", "''")
             safe_notes = notes_text.replace("'", "''")
             if entity_type == 'client':
-                _sql_query(f"INSERT INTO ClientNotes "
+                run_query_rows(f"INSERT INTO ClientNotes "
                            f"(CNClientSeq,CNDate,CNSubject,CNBy,CNNotes,CNLOCSEQ) "
                            f"VALUES ({entity_id},GETDATE(),'{safe_subj}','{author}','{safe_notes}',1)")
                 _cache.delete(f'dossier:{entity_id}')
             elif entity_type == 'pet':
-                _sql_query(f"INSERT INTO PetNotes "
+                run_query_rows(f"INSERT INTO PetNotes "
                            f"(PNPetSeq,PNDate,PNSubject,PNBy,PNNotes,PNLOCSEQ) "
                            f"VALUES ({entity_id},GETDATE(),'{safe_subj}','{author}','{safe_notes}',1)")
             else:
@@ -2199,9 +2154,9 @@ class WaitlistHandler(BaseHTTPRequestHandler):
 
         cmd = [
             'sqlcmd',
-            '-S', SQL_SERVER,
-            '-d', SQL_DATABASE,
-            *SQL_AUTH_ARGS,
+            '-S', db_utils.SQL_SERVER,
+            '-d', db_utils.SQL_DATABASE,
+            *db_utils.SQL_AUTH_ARGS,
             '-Q', query,
             '-s', '\t',  # Use TAB delimiter instead of pipe
             '-W',
@@ -2291,9 +2246,9 @@ class WaitlistHandler(BaseHTTPRequestHandler):
 
         cmd = [
             'sqlcmd',
-            '-S', SQL_SERVER,
-            '-d', SQL_DATABASE,
-            *SQL_AUTH_ARGS,
+            '-S', db_utils.SQL_SERVER,
+            '-d', db_utils.SQL_DATABASE,
+            *db_utils.SQL_AUTH_ARGS,
             '-Q', query
         ]
 
@@ -2325,8 +2280,8 @@ class WaitlistHandler(BaseHTTPRequestHandler):
         """
 
         cmd = [
-            'sqlcmd', '-S', SQL_SERVER, '-d', SQL_DATABASE,
-            *SQL_AUTH_ARGS,
+            'sqlcmd', '-S', db_utils.SQL_SERVER, '-d', db_utils.SQL_DATABASE,
+            *db_utils.SQL_AUTH_ARGS,
             '-Q', query, '-s', '\t', '-W', '-h', '-1'
         ]
 
@@ -2352,8 +2307,8 @@ class WaitlistHandler(BaseHTTPRequestHandler):
     def _run_query(self, query, use_tabs=True):
         """Run a sqlcmd query and return raw output lines"""
         cmd = [
-            'sqlcmd', '-S', SQL_SERVER, '-d', SQL_DATABASE,
-            *SQL_AUTH_ARGS,
+            'sqlcmd', '-S', db_utils.SQL_SERVER, '-d', db_utils.SQL_DATABASE,
+            *db_utils.SQL_AUTH_ARGS,
             '-Q', query, '-W', '-h', '-1'
         ]
         if use_tabs:
@@ -3022,7 +2977,7 @@ WHERE gl.GLDate = CAST(GETDATE() AS DATE)
   )
 ORDER BY gl.GLInTime, c.CLSeq
 """
-        rows = _sql_query(query.strip())
+        rows = run_query_rows(query.strip())
 
         # Group by ClientID — one card per client, list pets
         from collections import OrderedDict
@@ -3063,7 +3018,7 @@ ORDER BY gl.GLInTime, c.CLSeq
                     suggested = _suggest_next_date(cadence_val, pref_day_val)
 
                 cid = client_id
-                cn_rows = _sql_query(
+                cn_rows = run_query_rows(
                     f"SELECT TOP 3 CONVERT(varchar,CNDate,23), ISNULL(CNSubject,''), ISNULL(CNNotes,'') "
                     f"FROM ClientNotes WHERE CNClientSeq={cid} ORDER BY CNDate DESC, CNSeq DESC")
                 client_notes = [
@@ -3209,7 +3164,7 @@ ORDER BY gl.GLInTime, c.CLSeq
             "SMS voice: start with Hi [FirstName], concise, no emojis, no exclamation marks, use we/us. "
             "Return ONLY the JSON object — no explanation, no markdown."
         )
-        raw = _run_one_shot_claude(system, instruction, timeout=30)
+        raw = _run_one_shot_claude(system, instruction, timeout=60)
         if not raw:
             return {'success': False, 'error': 'Claude did not respond'}
 
@@ -3252,6 +3207,45 @@ ORDER BY gl.GLInTime, c.CLSeq
         log.info(f"[SMS] Composed outbound for {client['client_name']}: {draft[:60]}")
         return {'success': True, 'draft_id': draft_id,
                 'client_name': client['client_name'], 'draft': draft}
+
+    def sms_send_via_kc(self, data):
+        """Send SMS by proxying to KC's web API with session cookies from the extension."""
+        phone      = data.get('phone', '').strip()
+        message    = data.get('message', '').strip()
+        client_id  = int(data.get('client_id', 0))
+        cookie_str = data.get('cookies', '').strip()
+        if not phone or not message:
+            return {'success': False, 'error': 'phone and message required'}
+        if not cookie_str:
+            return {'success': False, 'error': 'KC session cookies required'}
+
+        try:
+            import urllib.request
+            import urllib.parse
+            boundary = '----ExtBoundary' + uuid.uuid4().hex[:8]
+            parts = []
+            for name, val in [('phoneNumber', phone), ('Message', message),
+                              ('MediaLinks', ''), ('ClientId', str(client_id)),
+                              ('MessageId', '0')]:
+                parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{val}')
+            body = '\r\n'.join(parts) + f'\r\n--{boundary}--\r\n'
+            req = urllib.request.Request(
+                'https://dbfcm.mykcapp.com/SMS/SMSSendFromFront',
+                data=body.encode('utf-8'),
+                headers={
+                    'Content-Type': f'multipart/form-data; boundary={boundary}',
+                    'Cookie': cookie_str,
+                    'X-Requested-With': 'XMLHttpRequest',
+                },
+                method='POST'
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                result = json.loads(resp.read().decode('utf-8'))
+            log.info(f"[SMS] send-via-kc: sent to {phone}, KC result: {result}")
+            return {'success': True, 'kc_result': result}
+        except Exception as e:
+            log.error(f"[SMS] send-via-kc error: {e}")
+            return {'success': False, 'error': str(e)}
 
     def sms_queue_outbound(self, data):
         """Manually queue an outbound SMS as a draft for review+send via the extension."""
@@ -3404,7 +3398,7 @@ ORDER BY gl.GLInTime, c.CLSeq
         conv_text = '\n'.join(conv_lines) if conv_lines else '(no conversation history)'
 
         # Client's pets for matching
-        pet_rows = _sql_query(
+        pet_rows = run_query_rows(
             f"SELECT PtSeq, PtPetName FROM Pets "
             f"WHERE PtOwnerCode={client_id} AND (PtDeleted IS NULL OR PtDeleted=0) "
             f"AND (PtInactive IS NULL OR PtInactive=0) AND (PtDeceased IS NULL OR PtDeceased=0)")
@@ -3497,7 +3491,7 @@ ORDER BY gl.GLInTime, c.CLSeq
             7:(55,75), 8:(60,80), 9:(75,85), 10:(80,90), 11:(90,100),
             12:(45,55), 13:(45,60), 14:(55,70), 15:(65,80), 16:(75,90),
         }
-        pr = _sql_query(
+        pr = run_query_rows(
             f"SELECT TOP 1 gl.GLRate, gl.GLBathRate, p.PtCat "
             f"FROM GroomingLog gl INNER JOIN Pets p ON gl.GLPetID=p.PtSeq "
             f"WHERE gl.GLPetID={pet_id} AND (gl.GLDeleted IS NULL OR gl.GLDeleted=0) "
@@ -3512,7 +3506,7 @@ ORDER BY gl.GLInTime, c.CLSeq
             except (ValueError, TypeError):
                 pass
         if gl_rate == 0:
-            cr = _sql_query(f"SELECT PtCat FROM Pets WHERE PtSeq={pet_id}")
+            cr = run_query_rows(f"SELECT PtCat FROM Pets WHERE PtSeq={pet_id}")
             if cr and cr[0]:
                 try: pt_cat = int(cr[0][0])
                 except: pass
@@ -3541,7 +3535,7 @@ ORDER BY gl.GLInTime, c.CLSeq
         in_time  = f"1899-12-30 {hh:02d}:{mm:02d}:00"
         out_time = f"1899-12-30 {out_h:02d}:{out_m:02d}:00"
 
-        _sql_query(
+        run_query_rows(
             f"INSERT INTO GroomingLog "
             f"(GLDate,GLInTime,GLOutTime,GLPetID,GLGroomerID,GLBatherID,GLOthersID,"
             f"GLBath,GLGroom,GLOthers,GLConfirmed,GLDeleted,GLWaitlist,GLTakenBy,GLRate,GLBathRate) "
@@ -3552,7 +3546,7 @@ ORDER BY gl.GLInTime, c.CLSeq
         _cache.delete('compact_avail')       # next SMS draft gets fresh slot list
         _cache.delete_prefix('holidays:')    # cheap; ensures holiday changes propagate
 
-        seq_rows = _sql_query(
+        seq_rows = run_query_rows(
             f"SELECT MAX(GLSeq) FROM GroomingLog "
             f"WHERE GLPetID={pet_id} AND GLDate='{date}' AND GLTakenBy='CLD'")
         new_seq = None

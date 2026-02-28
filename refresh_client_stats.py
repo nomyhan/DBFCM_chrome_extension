@@ -11,76 +11,13 @@ Called:
   - Standalone: python3 refresh_client_stats.py
 """
 
-import os
-import subprocess
 import sys
 from datetime import datetime, date
 from collections import defaultdict
 
-import socket as _socket
-_HOSTNAME = _socket.gethostname().upper()
-
-SQL_DATABASE = "wkennel7"
-
-if _HOSTNAME == 'DESKTOP-BIKIGBR':
-    # WSL on the SQL Server host — use the Windows host IP (default gateway)
-    try:
-        _gw = subprocess.run(['ip', 'route', 'show', 'default'], capture_output=True, text=True)
-        _WIN_IP = _gw.stdout.split()[2]
-    except Exception:
-        _WIN_IP = '172.22.224.1'
-    SQL_SERVER = f"{_WIN_IP},2721"
-    SQL_AUTH_ARGS = ['-U', 'noah', '-P', 'noah', '-N', 'disable']
-else:
-    SQL_SERVER = "desktop-bikigbr,2721"
-    SQL_AUTH_ARGS = ['-U', 'noah', '-P', 'noah']
+from db_utils import run_query, run_update, cols, SQL_DATABASE
 
 TABLE       = "DBFCMClientStats"
-
-# Auto-detect sqlcmd — not reliably on PATH in non-login WSL shells
-_SQLCMD_CANDIDATES = [
-    os.path.expanduser('~/sqlcmd'),    # works on any user's home dir
-    '/opt/mssql-tools18/bin/sqlcmd',
-    '/opt/mssql-tools/bin/sqlcmd',
-    '/usr/bin/sqlcmd',
-]
-SQLCMD_BIN = next((p for p in _SQLCMD_CANDIDATES if os.path.isfile(p)), 'sqlcmd')
-
-
-def _run_query(query: str, timeout: int = 60) -> list[str]:
-    cmd = [
-        SQLCMD_BIN,
-        "-S", SQL_SERVER, "-d", SQL_DATABASE,
-        *SQL_AUTH_ARGS,
-        "-Q", query,
-        "-s", "\t", "-W", "-h", "-1",
-    ]
-    result = subprocess.run(cmd, capture_output=True, timeout=timeout)
-    stdout = result.stdout.decode("latin-1")
-    if result.returncode != 0:
-        stderr = result.stderr.decode("latin-1")
-        raise RuntimeError(f"sqlcmd error: {stderr.strip()}")
-    return [
-        line for line in stdout.split("\n")
-        if line.strip() and not line.strip().startswith("---")
-    ]
-
-
-def _run_update(query: str, timeout: int = 60) -> None:
-    """Run a non-SELECT statement, piping SQL via stdin to avoid arg length limits."""
-    cmd = [
-        SQLCMD_BIN,
-        "-S", SQL_SERVER, "-d", SQL_DATABASE,
-        *SQL_AUTH_ARGS,
-    ]
-    result = subprocess.run(cmd, input=query.encode("utf-8"), capture_output=True, timeout=timeout)
-    if result.returncode != 0:
-        stderr = result.stderr.decode("latin-1")
-        raise RuntimeError(f"sqlcmd error: {stderr.strip()}")
-
-
-def _cols(line: str) -> list[str]:
-    return [c.strip() for c in line.split("\t")]
 
 
 def _sql_val(v) -> str:
@@ -96,7 +33,7 @@ def _sql_val(v) -> str:
 
 def _ensure_table() -> None:
     """Create DBFCMClientStats if it doesn't exist. Safe to call repeatedly."""
-    _run_update(f"""
+    run_update(f"""
 IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = '{TABLE}')
 CREATE TABLE {TABLE} (
     -- DBFCM addition: pre-computed client tip and visit cadence stats for Noah-bot.
@@ -156,13 +93,13 @@ ORDER BY r.RPCLIENTID, r.RPDATE DESC
 """
     if verbose:
         print(f"[{TABLE}] Querying tip data...", flush=True)
-    tip_lines = _run_query(tips_query, timeout=60)
+    tip_lines = run_query(tips_query, timeout=60)
 
     client_receipts: dict[str, list[dict]] = defaultdict(list)
     for line in tip_lines:
         if "\t" not in line:
             continue
-        c = _cols(line)
+        c = cols(line)
         if len(c) < 5:
             continue
         cid      = c[0]
@@ -262,7 +199,7 @@ ORDER BY c.CLSeq, gl.GLDate
 """
     if verbose:
         print(f"[{TABLE}] Querying cadence data...", flush=True)
-    cadence_lines = _run_query(cadence_query, timeout=60)
+    cadence_lines = run_query(cadence_query, timeout=60)
 
     # SQL DATEPART(dw): 1=Sun, 2=Mon, ..., 7=Sat
     dw_names = {1: "Sunday", 2: "Monday", 3: "Tuesday", 4: "Wednesday",
@@ -280,7 +217,7 @@ ORDER BY c.CLSeq, gl.GLDate
     for line in cadence_lines:
         if "\t" not in line:
             continue
-        c = _cols(line)
+        c = cols(line)
         if len(c) < 4:
             continue
         cid    = c[0]
@@ -352,7 +289,7 @@ ORDER BY c.CLSeq, gl.GLDate
     # ------------------------------------------------------------------
     # Fetch client names
     # ------------------------------------------------------------------
-    name_lines = _run_query("""
+    name_lines = run_query("""
 SELECT CLSeq, CLFirstName + ' ' + CLLastName
 FROM Clients
 WHERE (CLDeleted IS NULL OR CLDeleted = 0)
@@ -361,7 +298,7 @@ WHERE (CLDeleted IS NULL OR CLDeleted = 0)
     for line in name_lines:
         if "\t" not in line:
             continue
-        c = _cols(line)
+        c = cols(line)
         if len(c) >= 2:
             client_names[c[0]] = c[1]
 
@@ -402,7 +339,7 @@ WHERE (CLDeleted IS NULL OR CLDeleted = 0)
     if verbose:
         print(f"[{TABLE}] Writing {len(rows)} rows to SQL Server...", flush=True)
 
-    _run_update(f"TRUNCATE TABLE {TABLE}", timeout=15)
+    run_update(f"TRUNCATE TABLE {TABLE}", timeout=15)
 
     BATCH = 500
     for i in range(0, len(rows), BATCH):
@@ -416,7 +353,7 @@ WHERE (CLDeleted IS NULL OR CLDeleted = 0)
             f"{_sql_val(r[15])},{_sql_val(r[16])})"
             for r in batch
         )
-        _run_update(f"""
+        run_update(f"""
 INSERT INTO {TABLE} (
     ClientID, ClientName, LastUpdated,
     LastTipAmount, LastTipPct, LastTipDate,

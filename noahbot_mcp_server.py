@@ -18,32 +18,11 @@ import urllib.request
 import urllib.error
 from datetime import datetime, date
 
-# ---------------------------------------------------------------------------
-# SQL Server connection (WSL → SQL Server, per-machine via hostname)
-# ---------------------------------------------------------------------------
-import socket as _socket
-_HOSTNAME = _socket.gethostname().upper()
-
-SQL_DATABASE = "wkennel7"
-
-if _HOSTNAME == 'DESKTOP-BIKIGBR':
-    # WSL on the SQL Server host — hostname resolves to 127.0.1.1 which
-    # can't reach Windows, so get the Windows host IP from the default gateway.
-    try:
-        _gw = subprocess.run(['ip', 'route', 'show', 'default'], capture_output=True, text=True)
-        _WIN_IP = _gw.stdout.split()[2]
-    except Exception:
-        _WIN_IP = '172.22.224.1'
-    SQL_SERVER = f"{_WIN_IP},2721"
-    SQL_AUTH_ARGS = ['-U', 'noah', '-P', 'noah', '-N', 'disable']
-else:
-    SQL_SERVER = "desktop-bikigbr,2721"
-    SQL_AUTH_ARGS = ['-U', 'noah', '-P', 'noah']
+from db_utils import run_query, run_update, cols, sql_str
 
 # ---------------------------------------------------------------------------
 # Backend URL resolution (MCP server runs in WSL; backend may run on Windows)
 # ---------------------------------------------------------------------------
-
 def _get_wsl_windows_host_ip():
     """Return Windows host IP from WSL2 default gateway, or None if unavailable."""
     try:
@@ -69,25 +48,13 @@ def _is_wsl2() -> bool:
         return False
 
 # Build backend URL candidates: localhost first, Windows host IP as fallback.
-# On DESKTOP-BIKIGBR, _WIN_IP is already known; on other WSL2 machines, detect it.
 _BACKEND_URLS = ['http://localhost:8000']
-if _HOSTNAME == 'DESKTOP-BIKIGBR':
-    _BACKEND_URLS.append(f'http://{_WIN_IP}:8000')
-elif _is_wsl2():
+if _is_wsl2():
     _win_ip_fallback = _get_wsl_windows_host_ip()
     if _win_ip_fallback:
         _BACKEND_URLS.append(f'http://{_win_ip_fallback}:8000')
 
 VALID_GROOMER_IDS = {8, 59, 85, 91, 94, 95, 97}
-
-# Auto-detect sqlcmd — not reliably on PATH in non-login WSL shells
-_SQLCMD_CANDIDATES = [
-    os.path.expanduser('~/sqlcmd'),    # works on any user's home dir
-    '/opt/mssql-tools18/bin/sqlcmd',
-    '/opt/mssql-tools/bin/sqlcmd',
-    '/usr/bin/sqlcmd',
-]
-SQLCMD_BIN = next((p for p in _SQLCMD_CANDIDATES if os.path.isfile(p)), 'sqlcmd')
 
 # ---------------------------------------------------------------------------
 # Input validation helpers
@@ -111,61 +78,11 @@ def _escape_like(s: str) -> str:
     s = s.replace("[", "[[]").replace("%", "[%]").replace("_", "[_]")
     return s
 
-def _escape_sql(s: str) -> str:
-    """Escape single quotes for SQL string literals."""
-    return s.replace("'", "''")
-
 def _validate_note_text(s: str) -> str:
     """Validate note text: max 500 chars, escape quotes."""
     if len(s) > 500:
         raise ValueError("Note text exceeds 500 characters.")
-    return _escape_sql(s.strip())
-
-# ---------------------------------------------------------------------------
-# SQL execution
-# ---------------------------------------------------------------------------
-
-def _run_query(query: str, timeout: int = 30) -> list[str]:
-    """Run a sqlcmd query and return non-empty, non-separator output lines."""
-    cmd = [
-        SQLCMD_BIN,
-        '-S', SQL_SERVER,
-        '-d', SQL_DATABASE,
-        *SQL_AUTH_ARGS,
-        '-Q', query,
-        '-s', '\t',
-        '-W',
-        '-h', '-1',
-    ]
-    result = subprocess.run(cmd, capture_output=True, timeout=timeout)
-    stdout = result.stdout.decode('latin-1')
-    stderr = result.stderr.decode('latin-1')
-    if result.returncode != 0:
-        raise RuntimeError(f"sqlcmd error: {stderr.strip()}")
-    return [
-        line for line in stdout.split('\n')
-        if line.strip()
-        and not line.strip().startswith('---')
-        and not line.strip().startswith('(')  # filters "(N rows affected)"
-    ]
-
-def _run_update(query: str, timeout: int = 15) -> None:
-    """Run a non-SELECT sqlcmd statement."""
-    cmd = [
-        SQLCMD_BIN,
-        '-S', SQL_SERVER,
-        '-d', SQL_DATABASE,
-        *SQL_AUTH_ARGS,
-        '-Q', query,
-    ]
-    result = subprocess.run(cmd, capture_output=True, timeout=timeout)
-    stderr = result.stderr.decode('latin-1')
-    if result.returncode != 0:
-        raise RuntimeError(f"sqlcmd error: {stderr.strip()}")
-
-def _cols(line: str) -> list[str]:
-    """Split a tab-delimited line, stripping each cell."""
-    return [c.strip() for c in line.split('\t')]
+    return sql_str(s.strip())
 
 # ---------------------------------------------------------------------------
 # Tool implementations
@@ -216,7 +133,7 @@ AND (gl.GLWaitlist IS NULL OR gl.GLWaitlist = 0)
 {groomer_clause}
 ORDER BY gl.GLDate, gl.GLInTime
 """
-    lines = _run_query(query, timeout=30)
+    lines = run_query(query, timeout=30)
     if not lines:
         return f"No appointments found between {date_from} and {date_to}."
 
@@ -224,7 +141,7 @@ ORDER BY gl.GLDate, gl.GLInTime
     for line in lines:
         if '\t' not in line:
             continue
-        c = _cols(line)
+        c = cols(line)
         if len(c) < 14:
             continue
         time_display = f"{c[1][:5]}–{c[2][:5]}" if c[2] else c[1][:5]
@@ -282,7 +199,7 @@ AND (
 )
 ORDER BY c.CLLastName, c.CLFirstName, p.PtPetName
 """
-    lines = _run_query(query, timeout=30)
+    lines = run_query(query, timeout=30)
     if not lines or not any('\t' in l for l in lines):
         return f"No clients or pets found matching '{raw_name}'."
 
@@ -294,7 +211,7 @@ ORDER BY c.CLLastName, c.CLFirstName, p.PtPetName
     for line in lines:
         if '\t' not in line:
             continue
-        c = _cols(line)
+        c = cols(line)
         if len(c) < 14:
             continue
         cl_id = c[0]
@@ -347,7 +264,7 @@ AND (gl.GLWaitlist IS NULL OR gl.GLWaitlist = 0)
 AND gl.GLDate <= CONVERT(date, GETDATE())
 ORDER BY c.CLSeq, gl.GLDate DESC
 """
-    hist_lines = _run_query(hist_query, timeout=30)
+    hist_lines = run_query(hist_query, timeout=30)
 
     # Group history by client, keep last 5 per client
     hist_by_client: dict[str, list[str]] = {}
@@ -355,7 +272,7 @@ ORDER BY c.CLSeq, gl.GLDate DESC
     for line in hist_lines:
         if '\t' not in line:
             continue
-        h = _cols(line)
+        h = cols(line)
         if len(h) < 5:
             continue
         cid = h[0]
@@ -370,7 +287,7 @@ ORDER BY c.CLSeq, gl.GLDate DESC
     stats_by_client: dict[str, str] = {}
     try:
         id_list_stats = ','.join(client_ids[:10])
-        stats_lines = _run_query(f"""
+        stats_lines = run_query(f"""
 SELECT
     ClientID, TipMethod, LastTipAmount, LastTipPct,
     AvgTipAmount, AvgTipPct, TipReceiptCount, PreferredPayment,
@@ -382,7 +299,7 @@ WHERE ClientID IN ({id_list_stats})
         for line in stats_lines:
             if '\t' not in line:
                 continue
-            s = _cols(line)
+            s = cols(line)
             if len(s) < 14:
                 continue
             cid   = s[0]
@@ -511,7 +428,7 @@ AND gs.GroomerSchWEDate = (
 {groomer_clause}
 ORDER BY e.USFNAME
 """
-    sched_lines = _run_query(sched_query, timeout=20)
+    sched_lines = run_query(sched_query, timeout=20)
 
     if not any('\t' in l for l in sched_lines):
         return f"No groomers scheduled on {target_date} ({day_names[dow]})."
@@ -535,14 +452,14 @@ AND (gl.GLWaitlist IS NULL OR gl.GLWaitlist = 0)
 {groomer_filter}
 ORDER BY gl.GLInTime
 """
-    appt_lines = _run_query(appt_query, timeout=20)
+    appt_lines = run_query(appt_query, timeout=20)
 
     # Build booked slots per groomer
     booked: dict[str, list[dict]] = {}
     for line in appt_lines:
         if '\t' not in line:
             continue
-        a = _cols(line)
+        a = cols(line)
         if len(a) < 7:
             continue
         gr_id, ba_id, oth_id = a[0], a[1], a[2]
@@ -581,7 +498,7 @@ ORDER BY gl.GLInTime
     for line in sched_lines:
         if '\t' not in line:
             continue
-        s = _cols(line)
+        s = cols(line)
         if len(s) < 4:
             continue
         gid_str = s[0]
@@ -645,7 +562,7 @@ AND (gl.GLDeleted IS NULL OR gl.GLDeleted = 0)
 {groomer_clause}
 ORDER BY gl.GLDate, gl.GLSeq
 """
-    lines = _run_query(query, timeout=30)
+    lines = run_query(query, timeout=30)
     if not any('\t' in l for l in lines):
         return "Waitlist is empty."
 
@@ -653,7 +570,7 @@ ORDER BY gl.GLDate, gl.GLSeq
     for line in lines:
         if '\t' not in line:
             continue
-        w = _cols(line)
+        w = cols(line)
         if len(w) < 13:
             continue
         row = (
@@ -695,7 +612,7 @@ WHERE gs.GroomerSchWEDate BETWEEN
 AND gs.GroomerSchID IN (59, 85, 95, 8)
 ORDER BY gs.GroomerSchWEDate, e.USFNAME
 """
-    sched_lines = _run_query(sched_query, timeout=20)
+    sched_lines = run_query(sched_query, timeout=20)
 
     # BlockedTime
     blocked_query = f"""
@@ -709,7 +626,7 @@ WHERE bt.BTDate BETWEEN '{date_from}' AND '{date_to}'
 AND bt.BTGroomerID IN (59, 85, 95, 8)
 ORDER BY bt.BTDate, e.USFNAME
 """
-    blocked_lines = _run_query(blocked_query, timeout=20)
+    blocked_lines = run_query(blocked_query, timeout=20)
 
     day_labels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 
@@ -718,7 +635,7 @@ ORDER BY bt.BTDate, e.USFNAME
     for line in sched_lines:
         if '\t' not in line:
             continue
-        s = _cols(line)
+        s = cols(line)
         if len(s) < 9:
             continue
         week_end = s[2]
@@ -735,7 +652,7 @@ ORDER BY bt.BTDate, e.USFNAME
     for line in blocked_lines:
         if '\t' not in line:
             continue
-        b = _cols(line)
+        b = cols(line)
         if len(b) < 3:
             continue
         output.append(f"  {b[0]} blocked {b[1]}: {b[2] or 'No reason given'}")
@@ -769,7 +686,7 @@ def tool_append_note(args: dict) -> str:
     safe_body = safe_text.replace("'", "''")
 
     if entity_type == 'client':
-        check = _run_query(
+        check = run_query(
             f"SELECT CLFirstName + ' ' + CLLastName FROM Clients WHERE CLSeq={eid} "
             f"AND (CLDeleted IS NULL OR CLDeleted=0)",
             timeout=10
@@ -777,7 +694,7 @@ def tool_append_note(args: dict) -> str:
         if not check or not any(l.strip() for l in check):
             raise ValueError(f"Client ID {eid} not found.")
         entity_name = check[0].strip()
-        _run_update(
+        run_update(
             f"INSERT INTO ClientNotes (CNClientSeq,CNDate,CNSubject,CNBy,CNNotes,CNLOCSEQ) "
             f"VALUES ({eid},GETDATE(),'{safe_subj}','CLD','{safe_body}',1)",
             timeout=10
@@ -785,7 +702,7 @@ def tool_append_note(args: dict) -> str:
         return f"Note added to {entity_name}'s record: \"{subject}\""
 
     else:  # pet
-        check = _run_query(
+        check = run_query(
             f"SELECT PtPetName FROM Pets WHERE PtSeq={eid} "
             f"AND (PtDeleted IS NULL OR PtDeleted=0)",
             timeout=10
@@ -793,7 +710,7 @@ def tool_append_note(args: dict) -> str:
         if not check or not any(l.strip() for l in check):
             raise ValueError(f"Pet ID {eid} not found.")
         entity_name = check[0].strip()
-        _run_update(
+        run_update(
             f"INSERT INTO PetNotes (PNPetSeq,PNDate,PNSubject,PNBy,PNNotes,PNLOCSEQ) "
             f"VALUES ({eid},GETDATE(),'{safe_subj}','CLD','{safe_body}',1)",
             timeout=10
@@ -864,7 +781,7 @@ def tool_create_appointment(args: dict) -> str:
         )
 
     # Look up pet + client
-    pet_rows = _run_query(f"""
+    pet_rows = run_query(f"""
 SELECT p.PtSeq, p.PtPetName, p.PtCat, c.CLSeq, c.CLFirstName, c.CLLastName
 FROM Pets p
 INNER JOIN Clients c ON p.PtOwnerCode = c.CLSeq
@@ -873,13 +790,13 @@ AND (p.PtDeleted IS NULL OR p.PtDeleted = 0)
 """, timeout=10)
     if not pet_rows or not any('\t' in l for l in pet_rows):
         raise ValueError(f"Pet ID {pet_id} not found.")
-    pr = _cols(next(l for l in pet_rows if '\t' in l))
+    pr = cols(next(l for l in pet_rows if '\t' in l))
     pt_cat      = int(pr[2]) if pr[2].isdigit() else 0
     client_name = f"{pr[4]} {pr[5]}"
     pet_name    = pr[1]
 
     # Pricing: try last appointment first, fall back to standard table
-    price_rows = _run_query(f"""
+    price_rows = run_query(f"""
 SELECT TOP 1 GLRate, GLBathRate
 FROM GroomingLog
 WHERE GLPetID = {pet_id}
@@ -889,7 +806,7 @@ AND GLRate > 0
 ORDER BY GLDate DESC
 """, timeout=10)
     if price_rows and any('\t' in l for l in price_rows):
-        pp = _cols(next(l for l in price_rows if '\t' in l))
+        pp = cols(next(l for l in price_rows if '\t' in l))
         try:
             gl_rate      = float(pp[0])
             gl_bath_rate = float(pp[1])
@@ -907,7 +824,7 @@ ORDER BY GLDate DESC
 
     # Only check for slot conflicts on real appointments (not waitlist entries)
     if not is_waitlist:
-        conflict_rows = _run_query(f"""
+        conflict_rows = run_query(f"""
 SELECT p.PtPetName, CONVERT(varchar, gl.GLInTime, 108), CONVERT(varchar, gl.GLOutTime, 108)
 FROM GroomingLog gl
 INNER JOIN Pets p ON gl.GLPetID = p.PtSeq
@@ -921,7 +838,7 @@ AND (gl.GLWaitlist IS NULL OR gl.GLWaitlist = 0)
         for line in conflict_rows:
             if '\t' not in line:
                 continue
-            cf = _cols(line)
+            cf = cols(line)
             if len(cf) < 3:
                 continue
             try:
@@ -954,7 +871,7 @@ AND (gl.GLWaitlist IS NULL OR gl.GLWaitlist = 0)
 
     gl_waitlist_val = -1 if is_waitlist else 0
 
-    _run_update(f"""
+    run_update(f"""
 INSERT INTO GroomingLog
     (GLDate, GLInTime, GLOutTime, GLPetID, GLGroomerID, GLBatherID,
      GLBath, GLGroom, GLOthers, GLConfirmed, GLDeleted, GLWaitlist,
@@ -966,7 +883,7 @@ VALUES
 """, timeout=15)
 
     # Get the new GLSeq
-    seq_rows = _run_query(f"""
+    seq_rows = run_query(f"""
 SELECT TOP 1 GLSeq FROM GroomingLog
 WHERE GLPetID = {pet_id} AND GLDate = '{date}'
 AND GLTakenBy = 'CLD'
@@ -1038,10 +955,10 @@ LEFT JOIN Employees e2 ON gl.GLBatherID = e2.USSEQN
 WHERE gl.GLSeq = {appt_id}
 AND (gl.GLDeleted IS NULL OR gl.GLDeleted = 0)
 """
-    rows = _run_query(check_q)
+    rows = run_query(check_q)
     if not rows:
         raise ValueError(f"No active appointment found with GLSeq {appt_id}.")
-    c = _cols(rows[0])
+    c = cols(rows[0])
     if len(c) < 7:
         raise ValueError(f"Unexpected query result for GLSeq {appt_id}.")
 
@@ -1051,7 +968,7 @@ AND (gl.GLDeleted IS NULL OR gl.GLDeleted = 0)
     old_bather   = c[5]
     old_bather_id = c[6].strip()
 
-    _run_update(
+    run_update(
         f"UPDATE GroomingLog SET GLBatherID = {new_bather_id} WHERE GLSeq = {appt_id}"
     )
 
