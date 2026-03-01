@@ -46,6 +46,34 @@ function openReminderWindow(nextDay = 'tomorrow') {
     });
 }
 
+// ── Cookie relay to comm dashboard ──────────────────────────────────────────
+// POST KCApp session cookies to the dashboard so it can send SMS on our behalf
+
+const DASHBOARD_COOKIE_URL = 'http://localhost:5000/api/kc-cookies';
+
+async function relayCookies() {
+    try {
+        const cookies = await chrome.cookies.getAll({ url: 'https://dbfcm.mykcapp.com/' });
+        if (!cookies.length) return; // not logged in
+
+        const cookieDict = {};
+        for (const c of cookies) {
+            cookieDict[c.name] = c.value;
+        }
+
+        await fetch(DASHBOARD_COOKIE_URL, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Api-Key': 'dbfcm-relay-2026',
+            },
+            body: JSON.stringify({ cookies: cookieDict }),
+        });
+    } catch (e) {
+        // Dashboard may not be running — silent fail
+    }
+}
+
 // Update badge with waitlist count
 async function updateBadge() {
     try {
@@ -71,6 +99,7 @@ async function updateBadge() {
 chrome.runtime.onInstalled.addListener(() => {
     console.log('DBFCM Extension Backend installed');
     updateBadge();
+    relayCookies();
     schedulePrintReminder();
 });
 
@@ -80,6 +109,7 @@ chrome.alarms.create('updateBadge', { periodInMinutes: 5 });
 chrome.alarms.onAlarm.addListener((alarm) => {
     if (alarm.name === 'updateBadge') {
         updateBadge();
+        relayCookies();
     }
     if (alarm.name === PRINT_REMINDER_ALARM) {
         showPrintReminder();
